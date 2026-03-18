@@ -91,6 +91,8 @@ Skills connect into pipelines. Individual skill files don't describe these relat
 - **Security:** `review-security-issue` → `fix-security-issue`
 - **Policy iteration:** `openshell-cli` → `generate-sandbox-policy`
 
+Workflow state labels use the `state:*` prefix, and security work uses `topic:security`. GitHub issue templates assign built-in issue types where applicable, and agent-created issues should use issue types or manual follow-up rather than type labels.
+
 ## Prerequisites
 
 Install [mise](https://mise.jdx.dev/). This is used to set up the development environment.
