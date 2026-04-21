@@ -1798,15 +1798,21 @@ fn query_allowed_ips(
     }
 }
 
+/// Canonicalize the request-target for inference pattern detection.
+///
+/// Falls back to the raw path on canonicalization error: the request is then
+/// routed through the normal forward path, where `rest.rs::parse_http_request`
+/// will reject it properly. Returning the raw path here prevents a crafted
+/// target from bypassing inference routing without our detection logic having
+/// to implement a second, duplicate error-response surface.
 fn normalize_inference_path(path: &str) -> String {
-    if let Some(scheme_idx) = path.find("://") {
-        let after_scheme = &path[scheme_idx + 3..];
-        if let Some(path_start) = after_scheme.find('/') {
-            return after_scheme[path_start..].to_string();
-        }
-        return "/".to_string();
+    match crate::l7::path::canonicalize_request_target(
+        path,
+        &crate::l7::path::CanonicalizeOptions::default(),
+    ) {
+        Ok((canon, _)) => canon.path,
+        Err(_) => path.to_string(),
     }
-    path.to_string()
 }
 
 /// Extract the hostname from an absolute-form URI used in plain HTTP proxy requests.
@@ -2037,8 +2043,11 @@ async fn handle_forward_proxy(
     secret_resolver: Option<Arc<SecretResolver>>,
     denial_tx: Option<&mpsc::UnboundedSender<DenialEvent>>,
 ) -> Result<()> {
-    // 1. Parse the absolute-form URI
-    let (scheme, host, port, path) = match parse_proxy_uri(target_uri) {
+    // 1. Parse the absolute-form URI. `path` is marked `mut` so that, when an
+    //    L7 config applies, the canonicalized form produced below replaces it
+    //    in-place — keeping OPA evaluation and the bytes written onto the wire
+    //    in sync. See the L7 block below.
+    let (scheme, host, port, mut path) = match parse_proxy_uri(target_uri) {
         Ok(parsed) => parsed,
         Err(e) => {
             let event = HttpActivityBuilder::new(crate::ocsf_ctx())
@@ -2217,11 +2226,54 @@ async fn handle_forward_proxy(
             secret_resolver: secret_resolver.clone(),
         };
 
-        let (target_path, query_params) = crate::l7::rest::parse_target_query(&path)
-            .unwrap_or_else(|_| (path.clone(), std::collections::HashMap::new()));
+        // Canonicalize the request-target. The canonical form is fed to OPA
+        // AND reassigned to the outer `path` variable so the later call to
+        // `rewrite_forward_request` writes canonical bytes to the upstream.
+        // This closes the policy/upstream parser-differential at this site;
+        // without this reassignment, OPA would evaluate the canonical form
+        // while the upstream re-normalizes the raw input and dispatches on a
+        // potentially different path.
+        let canonicalize_options = crate::l7::path::CanonicalizeOptions {
+            allow_encoded_slash: l7_config.allow_encoded_slash,
+            ..Default::default()
+        };
+        let query_params =
+            match crate::l7::path::canonicalize_request_target(&path, &canonicalize_options) {
+                Ok((canon, query)) => {
+                    let params = match query.as_deref() {
+                        Some(q) => crate::l7::rest::parse_query_params(q).unwrap_or_default(),
+                        None => std::collections::HashMap::new(),
+                    };
+                    path = canon.path;
+                    params
+                }
+                Err(e) => {
+                    let event = NetworkActivityBuilder::new(crate::ocsf_ctx())
+                        .activity(ActivityId::Fail)
+                        .severity(SeverityId::Medium)
+                        .status(StatusId::Failure)
+                        .dst_endpoint(Endpoint::from_domain(&host_lc, port))
+                        .message(format!(
+                            "FORWARD_L7 rejecting non-canonical request-target: {e}"
+                        ))
+                        .build();
+                    ocsf_emit!(event);
+                    respond(
+                        client,
+                        &build_json_error_response(
+                            400,
+                            "Bad Request",
+                            "invalid_request_target",
+                            "request-target must be canonical",
+                        ),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            };
         let request_info = crate::l7::L7RequestInfo {
             action: method.to_string(),
-            target: target_path,
+            target: path.clone(),
             query_params,
         };
 
@@ -3514,6 +3566,35 @@ mod tests {
         assert!(result_str.contains("Via: 1.0 upstream"));
         // Should not add a second Via header
         assert!(!result_str.contains("Via: 1.1 openshell-sandbox"));
+    }
+
+    #[test]
+    fn test_rewrite_forward_request_uses_canonical_path_on_the_wire() {
+        // Regression: the forward-proxy caller must canonicalize first and
+        // then pass the canonical form to rewrite_forward_request so that
+        // OPA's policy evaluation and the bytes dispatched to the upstream
+        // agree. Prior to this guarantee, OPA saw the canonical form while
+        // the upstream re-normalized the raw path independently, re-opening
+        // the parser-differential this PR closes.
+        let raw = b"GET http://host/public/../secret HTTP/1.1\r\nHost: host\r\n\r\n";
+        let (canon, _) = crate::l7::path::canonicalize_request_target(
+            "/public/../secret",
+            &crate::l7::path::CanonicalizeOptions::default(),
+        )
+        .expect("canonicalization should succeed for the attack payload");
+        assert_eq!(canon.path, "/secret");
+
+        let rewritten = rewrite_forward_request(raw, raw.len(), &canon.path, None)
+            .expect("rewrite_forward_request should succeed");
+        let rewritten_str = String::from_utf8_lossy(&rewritten);
+        assert!(
+            rewritten_str.starts_with("GET /secret HTTP/1.1\r\n"),
+            "outbound request line must use canonical path, got: {rewritten_str:?}"
+        );
+        assert!(
+            !rewritten_str.contains(".."),
+            "outbound bytes must not leak the pre-canonical form, got: {rewritten_str:?}"
+        );
     }
 
     #[test]
