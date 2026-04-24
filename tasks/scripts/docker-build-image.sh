@@ -152,6 +152,25 @@ if [[ -n "${CI:-}" ]]; then
 	CODEGEN_ARGS=(--build-arg "CARGO_CODEGEN_UNITS=1")
 fi
 
+# OS-128 Phase 4: opt in to consuming pre-built Rust binaries instead of
+# compiling inside Docker. Default path (`build`) is unchanged. When
+# USE_PREBUILT_BINARIES=true, the Dockerfile's BINARY_SOURCE=prebuilt stages
+# are selected, which COPY from deploy/docker/.build/prebuilt-binaries/<arch>/
+# in the build context. Callers must stage the binaries before invoking.
+BINARY_SOURCE_ARGS=()
+if [[ "${USE_PREBUILT_BINARIES:-}" == "true" ]]; then
+  case "${TARGET}" in
+    gateway|supervisor|cluster|supervisor-output)
+      if [[ ! -d deploy/docker/.build/prebuilt-binaries ]]; then
+        echo "Error: USE_PREBUILT_BINARIES=true but deploy/docker/.build/prebuilt-binaries/ does not exist" >&2
+        echo "  Stage binaries at deploy/docker/.build/prebuilt-binaries/<arch>/openshell-{gateway,sandbox}" >&2
+        exit 1
+      fi
+      BINARY_SOURCE_ARGS=(--build-arg "BINARY_SOURCE=prebuilt")
+      ;;
+  esac
+fi
+
 TAG_ARGS=()
 if [[ "${IS_FINAL_IMAGE}" == "1" ]]; then
 	TAG_ARGS=(-t "${IMAGE_NAME}:${IMAGE_TAG}")
@@ -190,6 +209,7 @@ ce_build \
 	${VERSION_ARGS[@]+"${VERSION_ARGS[@]}"} \
 	${K3S_ARGS[@]+"${K3S_ARGS[@]}"} \
 	${CODEGEN_ARGS[@]+"${CODEGEN_ARGS[@]}"} \
+	${BINARY_SOURCE_ARGS[@]+"${BINARY_SOURCE_ARGS[@]}"} \
 	${FEATURE_ARGS[@]+"${FEATURE_ARGS[@]}"} \
 	--build-arg "CARGO_TARGET_CACHE_SCOPE=${CARGO_TARGET_CACHE_SCOPE}" \
 	-f "${DOCKERFILE}" \
