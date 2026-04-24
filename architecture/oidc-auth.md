@@ -151,6 +151,7 @@ GET {jwks_uri}                                 ->  { keys: [...] }
 ```
 
 Keys are cached in memory with a configurable TTL (default: 1 hour). A `refresh_mutex` serializes refresh operations so concurrent requests coalesce into a single HTTP fetch. The cache refreshes:
+
 - When the TTL expires (on next request, re-checked under the mutex to avoid thundering herd).
 - Immediately when a JWT references a `kid` not in the cache (handles key rotation).
 
@@ -192,6 +193,7 @@ These methods accept either an OIDC Bearer token (CLI users) or a sandbox secret
 | `OpenShell/GetSandboxConfig` | CLI reads effective sandbox policy and settings; sandbox callers may still use the shared secret |
 
 **Sandbox-secret restriction on `UpdateConfig`:** When a sandbox-secret-authenticated caller invokes `UpdateConfig`, the handler in `policy.rs` enforces strict scope limits via `validate_sandbox_secret_update()`. The caller:
+
 - **Must** provide a sandbox `name` (sandbox-scoped only).
 - **Must** include a `policy` payload (policy sync only).
 - **May not** set `global = true` (no global config mutation).
