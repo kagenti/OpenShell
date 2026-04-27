@@ -1,0 +1,66 @@
+name: Kagenti CI
+
+on:
+  pull_request:
+    branches: [main, mvp]
+  push:
+    branches: [mvp]
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  MISE_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: jdx/mise-action@v2
+
+      - name: Cache Rust target and registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-checks
+
+      - name: Format
+        run: mise run rust:format:check
+
+      - name: Lint
+        run: mise run rust:lint
+
+      - name: Test
+        run: mise run test:rust
+
+  python:
+    name: Python
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: jdx/mise-action@v2
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Lint
+        run: mise run python:lint
+
+      - name: Test
+        run: mise run test:python
+
+  markdown:
+    name: Markdown
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: jdx/mise-action@v2
+
+      - name: Lint
+        run: mise run markdown:lint
