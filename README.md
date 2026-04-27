@@ -1,4 +1,4 @@
-# Kagenti OpenShell Fork
+# OpenShell (Kagenti Fork)
 
 > **This is a [Kagenti](https://github.com/kagenti/kagenti) fork of [NVIDIA/OpenShell](https://github.com/NVIDIA/OpenShell).**
 >
@@ -28,8 +28,6 @@ git push origin mvp --force-with-lease
 ```
 
 ---
-
-# NVIDIA OpenShell
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue)](https://github.com/NVIDIA/OpenShell/blob/main/LICENSE)
 [![PyPI](https://img.shields.io/badge/PyPI-openshell-orange?logo=pypi)](https://pypi.org/project/openshell/)
