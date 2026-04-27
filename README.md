@@ -1,3 +1,34 @@
+# Kagenti OpenShell Fork
+
+> **This is a [Kagenti](https://github.com/kagenti/kagenti) fork of [NVIDIA/OpenShell](https://github.com/NVIDIA/OpenShell).**
+>
+> The `mvp` branch contains Kagenti-specific changes for multi-tenant gateway deployment
+> with OIDC authentication (Keycloak), per-tenant compute isolation, and credential drivers.
+> See the [epic](https://github.com/kagenti/kagenti/issues/1363) for the full plan.
+>
+> **Upstream tracking:** `main` is kept in sync with `NVIDIA/OpenShell:main`.
+> Fork-specific work happens on the `mvp` branch.
+
+## Syncing with upstream
+
+```bash
+# Add upstream remote (one-time)
+git remote add upstream https://github.com/NVIDIA/OpenShell.git
+
+# Sync main
+git fetch upstream main
+git checkout main
+git merge upstream/main
+git push origin main
+
+# Rebase mvp onto latest main
+git checkout mvp
+git rebase main
+git push origin mvp --force-with-lease
+```
+
+---
+
 # NVIDIA OpenShell
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue)](https://github.com/NVIDIA/OpenShell/blob/main/LICENSE)
