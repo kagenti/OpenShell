@@ -10,8 +10,8 @@
 #![allow(clippy::cast_precision_loss)] // f64->f32 for confidence scores
 #![allow(clippy::items_after_statements)] // DB_PORTS const inside function
 
-use crate::{ServerState, auth::oidc};
 use crate::persistence::{DraftChunkRecord, ObjectId, ObjectName, PolicyRecord, Store};
+use crate::{ServerState, auth::oidc};
 use openshell_core::proto::policy_merge_operation;
 use openshell_core::proto::setting_value;
 use openshell_core::proto::{
