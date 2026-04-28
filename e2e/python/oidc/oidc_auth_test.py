@@ -168,7 +168,7 @@ class TestRbac:
         stub, metadata = _stub_with_token(token)
         req = openshell_pb2.CreateProviderRequest(
             provider=datamodel_pb2.Provider(
-                name="e2e-oidc-admin-test",
+                metadata=datamodel_pb2.ObjectMeta(name="e2e-oidc-admin-test"),
                 type="claude",
                 credentials={"API_KEY": "test-value"},
             )
@@ -192,7 +192,7 @@ class TestRbac:
         stub, metadata = _stub_with_token(token)
         req = openshell_pb2.CreateProviderRequest(
             provider=datamodel_pb2.Provider(
-                name="e2e-oidc-user-blocked",
+                metadata=datamodel_pb2.ObjectMeta(name="e2e-oidc-user-blocked"),
                 type="claude",
                 credentials={"API_KEY": "test-value"},
             )
