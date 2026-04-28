@@ -54,6 +54,7 @@ pub enum ComputeDriverKind {
     Vm,
     Docker,
     Podman,
+    External,
 }
 
 impl ComputeDriverKind {
@@ -64,6 +65,7 @@ impl ComputeDriverKind {
             Self::Vm => "vm",
             Self::Docker => "docker",
             Self::Podman => "podman",
+            Self::External => "external",
         }
     }
 }
@@ -83,8 +85,9 @@ impl FromStr for ComputeDriverKind {
             "vm" => Ok(Self::Vm),
             "docker" => Ok(Self::Docker),
             "podman" => Ok(Self::Podman),
+            "external" => Ok(Self::External),
             other => Err(format!(
-                "unsupported compute driver '{other}'. expected one of: kubernetes, vm, docker, podman"
+                "unsupported compute driver '{other}'. expected one of: kubernetes, vm, docker, podman, external"
             )),
         }
     }
@@ -246,6 +249,18 @@ pub struct Config {
     /// allowing them to reach services running on the Docker host.
     #[serde(default)]
     pub host_gateway_ip: String,
+
+    /// Unix domain socket path to an external compute driver.
+    /// When set with `--driver external`, the gateway connects to this
+    /// pre-existing socket instead of spawning a driver subprocess.
+    #[serde(default)]
+    pub compute_driver_socket: String,
+
+    /// Unix domain socket path to a credentials driver.
+    /// When set, the gateway delegates credential resolution to this
+    /// out-of-process driver via the `CredentialsDriver` gRPC contract.
+    #[serde(default)]
+    pub credentials_driver_socket: String,
 }
 
 /// TLS configuration.
@@ -359,6 +374,8 @@ impl Config {
             ssh_session_ttl_secs: default_ssh_session_ttl_secs(),
             client_tls_secret_name: String::new(),
             host_gateway_ip: String::new(),
+            compute_driver_socket: String::new(),
+            credentials_driver_socket: String::new(),
         }
     }
 
@@ -515,6 +532,20 @@ impl Config {
         self.oidc = Some(oidc);
         self
     }
+
+    /// Set the Unix domain socket path for an external compute driver.
+    #[must_use]
+    pub fn with_compute_driver_socket(mut self, path: impl Into<String>) -> Self {
+        self.compute_driver_socket = path.into();
+        self
+    }
+
+    /// Set the Unix domain socket path for a credentials driver.
+    #[must_use]
+    pub fn with_credentials_driver_socket(mut self, path: impl Into<String>) -> Self {
+        self.credentials_driver_socket = path.into();
+        self
+    }
 }
 
 fn default_bind_address() -> SocketAddr {
@@ -583,6 +614,14 @@ mod tests {
         assert_eq!(
             "docker".parse::<ComputeDriverKind>().unwrap(),
             ComputeDriverKind::Docker
+        );
+    }
+
+    #[test]
+    fn compute_driver_kind_parses_external() {
+        assert_eq!(
+            "external".parse::<ComputeDriverKind>().unwrap(),
+            ComputeDriverKind::External
         );
     }
 

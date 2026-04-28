@@ -600,6 +600,26 @@ async fn build_compute_runtime(
             .await
             .map_err(|e| Error::execution(format!("failed to create compute runtime: {e}")))
         }
+        ComputeDriverKind::External => {
+            if config.compute_driver_socket.is_empty() {
+                return Err(Error::config(
+                    "--compute-driver-socket is required when using the external compute driver",
+                ));
+            }
+            let socket_path = std::path::Path::new(&config.compute_driver_socket);
+            let channel = compute::external::connect(socket_path).await?;
+            ComputeRuntime::new_remote_vm(
+                channel,
+                None,
+                store,
+                sandbox_index,
+                sandbox_watch_bus,
+                tracing_log_bus,
+                supervisor_sessions,
+            )
+            .await
+            .map_err(|e| Error::execution(format!("failed to create compute runtime: {e}")))
+        }
     }
 }
 
@@ -615,7 +635,8 @@ fn configured_compute_driver(config: &Config) -> Result<ComputeDriverKind> {
             driver @ (ComputeDriverKind::Kubernetes
             | ComputeDriverKind::Vm
             | ComputeDriverKind::Docker
-            | ComputeDriverKind::Podman),
+            | ComputeDriverKind::Podman
+            | ComputeDriverKind::External),
         ] => Ok(*driver),
         drivers => Err(Error::config(format!(
             "multiple compute drivers are not supported yet; configured drivers: {}",
@@ -723,6 +744,15 @@ mod tests {
         assert_eq!(
             configured_compute_driver(&config).unwrap(),
             ComputeDriverKind::Docker
+        );
+    }
+
+    #[test]
+    fn configured_compute_driver_accepts_external() {
+        let config = Config::new(None).with_compute_drivers([ComputeDriverKind::External]);
+        assert_eq!(
+            configured_compute_driver(&config).unwrap(),
+            ComputeDriverKind::External
         );
     }
 

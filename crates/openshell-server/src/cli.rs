@@ -276,6 +276,18 @@ struct Args {
     /// Keycloak: "scope". Okta: "scp". Leave empty to disable scope enforcement.
     #[arg(long, env = "OPENSHELL_OIDC_SCOPES_CLAIM", default_value = "")]
     oidc_scopes_claim: String,
+
+    /// Unix domain socket path to an external compute driver.
+    /// Use with `--driver external` to delegate ComputeDriver RPCs to a
+    /// pre-existing out-of-process driver (e.g. a sidecar container).
+    #[arg(long, env = "OPENSHELL_COMPUTE_DRIVER_SOCKET")]
+    compute_driver_socket: Option<PathBuf>,
+
+    /// Unix domain socket path to a credentials driver.
+    /// When set, the gateway delegates credential resolution to this
+    /// out-of-process driver via the CredentialsDriver gRPC contract.
+    #[arg(long, env = "OPENSHELL_CREDENTIALS_DRIVER_SOCKET")]
+    credentials_driver_socket: Option<PathBuf>,
 }
 
 pub fn command() -> Command {
@@ -390,6 +402,14 @@ async fn run_from_args(args: Args) -> Result<()> {
 
     if let Some(ip) = args.host_gateway_ip {
         config = config.with_host_gateway_ip(ip);
+    }
+
+    if let Some(socket) = args.compute_driver_socket {
+        config = config.with_compute_driver_socket(socket.to_string_lossy());
+    }
+
+    if let Some(socket) = args.credentials_driver_socket {
+        config = config.with_credentials_driver_socket(socket.to_string_lossy());
     }
 
     if let Some(issuer) = args.oidc_issuer {
