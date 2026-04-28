@@ -21,11 +21,8 @@ use tracing::info;
 
 #[cfg(unix)]
 use {
-    hyper_util::rt::TokioIo,
-    std::time::Duration,
-    tokio::net::UnixStream,
-    tonic::transport::Endpoint,
-    tower::service_fn,
+    hyper_util::rt::TokioIo, std::time::Duration, tokio::net::UnixStream,
+    tonic::transport::Endpoint, tower::service_fn,
 };
 
 /// Handle to an out-of-process credentials driver connected over UDS.
@@ -46,10 +43,7 @@ impl CredentialsDriverHandle {
     }
 
     /// Resolve a named credential to an access token.
-    pub async fn resolve_credential(
-        &self,
-        name: &str,
-    ) -> Result<ResolveCredentialResponse> {
+    pub async fn resolve_credential(&self, name: &str) -> Result<ResolveCredentialResponse> {
         let mut client = CredentialsDriverClient::new(self.channel.clone());
         let response = client
             .resolve_credential(tonic::Request::new(ResolveCredentialRequest {
@@ -72,10 +66,7 @@ impl CredentialsDriverHandle {
             .list_credentials(tonic::Request::new(ListCredentialsRequest {}))
             .await
             .map_err(|s| {
-                Error::execution(format!(
-                    "credentials driver ListCredentials failed: {}",
-                    s
-                ))
+                Error::execution(format!("credentials driver ListCredentials failed: {}", s))
             })?;
         Ok(response.into_inner())
     }
