@@ -33,6 +33,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "../../proto/datamodel.proto",
         "../../proto/sandbox.proto",
         "../../proto/compute_driver.proto",
+        "../../proto/credentials_driver.proto",
         "../../proto/inference.proto",
         "../../proto/test.proto",
     ];

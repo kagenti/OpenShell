@@ -22,6 +22,7 @@
 mod auth;
 pub mod cli;
 mod compute;
+pub mod credentials;
 mod grpc;
 mod http;
 mod inference;
@@ -45,6 +46,7 @@ use tokio::net::TcpListener;
 use tracing::{debug, error, info};
 
 use compute::{ComputeRuntime, VmComputeConfig};
+use credentials::SharedCredentialsDriver;
 pub use grpc::OpenShellService;
 pub use http::{health_router, http_router, metrics_router};
 pub use multiplex::{MultiplexService, MultiplexedService};
@@ -90,6 +92,12 @@ pub struct ServerState {
 
     /// Registry of active supervisor sessions and pending relay channels.
     pub supervisor_sessions: Arc<supervisor_session::SupervisorSessionRegistry>,
+
+    /// OIDC JWKS cache for JWT validation. `None` when OIDC is not configured.
+    pub oidc_cache: Option<Arc<auth::oidc::JwksCache>>,
+
+    /// Optional out-of-process credentials driver.
+    pub credentials_driver: SharedCredentialsDriver,
 }
 
 fn is_benign_tls_handshake_failure(error: &std::io::Error) -> bool {
@@ -110,6 +118,8 @@ impl ServerState {
         sandbox_watch_bus: SandboxWatchBus,
         tracing_log_bus: TracingLogBus,
         supervisor_sessions: Arc<supervisor_session::SupervisorSessionRegistry>,
+        oidc_cache: Option<Arc<auth::oidc::JwksCache>>,
+        credentials_driver: SharedCredentialsDriver,
     ) -> Self {
         Self {
             config,
@@ -122,6 +132,8 @@ impl ServerState {
             ssh_connections_by_sandbox: Mutex::new(HashMap::new()),
             settings_mutex: tokio::sync::Mutex::new(()),
             supervisor_sessions,
+            oidc_cache,
+            credentials_driver,
         }
     }
 }
@@ -150,6 +162,24 @@ pub async fn run_server(
 
     let store = Arc::new(Store::connect(database_url).await?);
 
+    let oidc_cache = if let Some(ref oidc) = config.oidc {
+        // Validate RBAC configuration before starting.
+        let policy = auth::authz::AuthzPolicy {
+            admin_role: oidc.admin_role.clone(),
+            user_role: oidc.user_role.clone(),
+            scopes_enabled: !oidc.scopes_claim.is_empty(),
+        };
+        policy.validate().map_err(|e| Error::config(e))?;
+
+        let cache = auth::oidc::JwksCache::new(oidc)
+            .await
+            .map_err(|e| Error::config(format!("OIDC initialization failed: {e}")))?;
+        info!("OIDC JWT validation enabled (issuer: {})", oidc.issuer);
+        Some(Arc::new(cache))
+    } else {
+        None
+    };
+
     let sandbox_index = SandboxIndex::new();
     let sandbox_watch_bus = SandboxWatchBus::new();
     let supervisor_sessions = Arc::new(supervisor_session::SupervisorSessionRegistry::new());
@@ -163,6 +193,15 @@ pub async fn run_server(
         supervisor_sessions.clone(),
     )
     .await?;
+
+    let credentials_driver = if !config.credentials_driver_socket.is_empty() {
+        let socket_path = std::path::Path::new(&config.credentials_driver_socket);
+        let handle = credentials::CredentialsDriverHandle::connect(socket_path).await?;
+        Some(Arc::new(handle))
+    } else {
+        None
+    };
+
     let state = Arc::new(ServerState::new(
         config.clone(),
         store.clone(),
@@ -171,6 +210,8 @@ pub async fn run_server(
         sandbox_watch_bus,
         tracing_log_bus,
         supervisor_sessions,
+        oidc_cache,
+        credentials_driver,
     ));
 
     state.compute.spawn_watchers();
@@ -384,6 +425,26 @@ async fn build_compute_runtime(
             .await
             .map_err(|e| Error::execution(format!("failed to create compute runtime: {e}")))
         }
+        ComputeDriverKind::External => {
+            if config.compute_driver_socket.is_empty() {
+                return Err(Error::config(
+                    "--compute-driver-socket is required when using the external compute driver",
+                ));
+            }
+            let socket_path = std::path::Path::new(&config.compute_driver_socket);
+            let channel = compute::external::connect(socket_path).await?;
+            ComputeRuntime::new_remote_vm(
+                channel,
+                None,
+                store,
+                sandbox_index,
+                sandbox_watch_bus,
+                tracing_log_bus,
+                supervisor_sessions,
+            )
+            .await
+            .map_err(|e| Error::execution(format!("failed to create compute runtime: {e}")))
+        }
     }
 }
 
@@ -395,7 +456,8 @@ fn configured_compute_driver(config: &Config) -> Result<ComputeDriverKind> {
         [
             driver @ (ComputeDriverKind::Kubernetes
             | ComputeDriverKind::Vm
-            | ComputeDriverKind::Podman),
+            | ComputeDriverKind::Podman
+            | ComputeDriverKind::External),
         ] => Ok(*driver),
         drivers => Err(Error::config(format!(
             "multiple compute drivers are not supported yet; configured drivers: {}",
@@ -468,6 +530,15 @@ mod tests {
         assert_eq!(
             configured_compute_driver(&config).unwrap(),
             ComputeDriverKind::Vm
+        );
+    }
+
+    #[test]
+    fn configured_compute_driver_accepts_external() {
+        let config = Config::new(None).with_compute_drivers([ComputeDriverKind::External]);
+        assert_eq!(
+            configured_compute_driver(&config).unwrap(),
+            ComputeDriverKind::External
         );
     }
 }

@@ -188,6 +188,63 @@ struct Args {
     /// certificate. Ignored when --disable-tls is set.
     #[arg(long, env = "OPENSHELL_DISABLE_GATEWAY_AUTH")]
     disable_gateway_auth: bool,
+
+    /// OIDC issuer URL for JWT-based authentication.
+    /// When set, the server validates `authorization: Bearer` tokens on gRPC
+    /// requests against the issuer's JWKS endpoint.
+    #[arg(long, env = "OPENSHELL_OIDC_ISSUER")]
+    oidc_issuer: Option<String>,
+
+    /// Expected OIDC audience claim (typically the client ID).
+    #[arg(long, env = "OPENSHELL_OIDC_AUDIENCE", default_value = "openshell-cli")]
+    oidc_audience: String,
+
+    /// JWKS key cache TTL in seconds.
+    #[arg(long, env = "OPENSHELL_OIDC_JWKS_TTL", default_value_t = 3600)]
+    oidc_jwks_ttl: u64,
+
+    /// Dot-separated path to the roles array in the JWT claims.
+    /// Keycloak: "realm_access.roles" (default). Entra ID: "roles". Okta: "groups".
+    #[arg(
+        long,
+        env = "OPENSHELL_OIDC_ROLES_CLAIM",
+        default_value = "realm_access.roles"
+    )]
+    oidc_roles_claim: String,
+
+    /// Role name that grants admin access.
+    #[arg(
+        long,
+        env = "OPENSHELL_OIDC_ADMIN_ROLE",
+        default_value = "openshell-admin"
+    )]
+    oidc_admin_role: String,
+
+    /// Role name that grants standard user access.
+    #[arg(
+        long,
+        env = "OPENSHELL_OIDC_USER_ROLE",
+        default_value = "openshell-user"
+    )]
+    oidc_user_role: String,
+
+    /// Dot-separated path to the scopes value in the JWT claims.
+    /// When set, the server enforces scope-based permissions on top of roles.
+    /// Keycloak: "scope". Okta: "scp". Leave empty to disable scope enforcement.
+    #[arg(long, env = "OPENSHELL_OIDC_SCOPES_CLAIM", default_value = "")]
+    oidc_scopes_claim: String,
+
+    /// Unix domain socket path to an external compute driver.
+    /// Use with `--driver external` to delegate ComputeDriver RPCs to a
+    /// pre-existing out-of-process driver (e.g. a sidecar container).
+    #[arg(long, env = "OPENSHELL_COMPUTE_DRIVER_SOCKET")]
+    compute_driver_socket: Option<PathBuf>,
+
+    /// Unix domain socket path to a credentials driver.
+    /// When set, the gateway delegates credential resolution to this
+    /// out-of-process driver via the CredentialsDriver gRPC contract.
+    #[arg(long, env = "OPENSHELL_CREDENTIALS_DRIVER_SOCKET")]
+    credentials_driver_socket: Option<PathBuf>,
 }
 
 pub fn command() -> Command {
@@ -302,6 +359,26 @@ async fn run_from_args(args: Args) -> Result<()> {
 
     if let Some(ip) = args.host_gateway_ip {
         config = config.with_host_gateway_ip(ip);
+    }
+
+    if let Some(socket) = args.compute_driver_socket {
+        config = config.with_compute_driver_socket(socket.to_string_lossy());
+    }
+
+    if let Some(socket) = args.credentials_driver_socket {
+        config = config.with_credentials_driver_socket(socket.to_string_lossy());
+    }
+
+    if let Some(issuer) = args.oidc_issuer {
+        config = config.with_oidc(openshell_core::OidcConfig {
+            issuer,
+            audience: args.oidc_audience,
+            jwks_ttl_secs: args.oidc_jwks_ttl,
+            roles_claim: args.oidc_roles_claim,
+            admin_role: args.oidc_admin_role,
+            user_role: args.oidc_user_role,
+            scopes_claim: args.oidc_scopes_claim,
+        });
     }
 
     let vm_config = VmComputeConfig {
