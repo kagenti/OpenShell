@@ -22,6 +22,7 @@
 mod auth;
 pub mod cli;
 mod compute;
+pub mod credentials;
 mod grpc;
 mod http;
 mod inference;
@@ -45,6 +46,7 @@ use tokio::net::TcpListener;
 use tracing::{debug, error, info};
 
 use compute::{ComputeRuntime, VmComputeConfig};
+use credentials::SharedCredentialsDriver;
 pub use grpc::OpenShellService;
 pub use http::{health_router, http_router, metrics_router};
 pub use multiplex::{MultiplexService, MultiplexedService};
@@ -93,6 +95,9 @@ pub struct ServerState {
 
     /// OIDC JWKS cache for JWT validation. `None` when OIDC is not configured.
     pub oidc_cache: Option<Arc<auth::oidc::JwksCache>>,
+
+    /// Optional out-of-process credentials driver.
+    pub credentials_driver: SharedCredentialsDriver,
 }
 
 fn is_benign_tls_handshake_failure(error: &std::io::Error) -> bool {
@@ -114,6 +119,7 @@ impl ServerState {
         tracing_log_bus: TracingLogBus,
         supervisor_sessions: Arc<supervisor_session::SupervisorSessionRegistry>,
         oidc_cache: Option<Arc<auth::oidc::JwksCache>>,
+        credentials_driver: SharedCredentialsDriver,
     ) -> Self {
         Self {
             config,
@@ -127,6 +133,7 @@ impl ServerState {
             settings_mutex: tokio::sync::Mutex::new(()),
             supervisor_sessions,
             oidc_cache,
+            credentials_driver,
         }
     }
 }
@@ -186,6 +193,15 @@ pub async fn run_server(
         supervisor_sessions.clone(),
     )
     .await?;
+
+    let credentials_driver = if !config.credentials_driver_socket.is_empty() {
+        let socket_path = std::path::Path::new(&config.credentials_driver_socket);
+        let handle = credentials::CredentialsDriverHandle::connect(socket_path).await?;
+        Some(Arc::new(handle))
+    } else {
+        None
+    };
+
     let state = Arc::new(ServerState::new(
         config.clone(),
         store.clone(),
@@ -195,6 +211,7 @@ pub async fn run_server(
         tracing_log_bus,
         supervisor_sessions,
         oidc_cache,
+        credentials_driver,
     ));
 
     state.compute.spawn_watchers();
