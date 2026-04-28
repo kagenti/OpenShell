@@ -3,6 +3,7 @@
 
 //! Gateway-owned compute orchestration over a pluggable compute backend.
 
+pub(crate) mod external;
 pub mod vm;
 
 pub use vm::VmComputeConfig;
