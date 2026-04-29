@@ -1109,6 +1109,7 @@ fn driver_sandbox_spec_from_public(spec: &SandboxSpec) -> DriverSandboxSpec {
             .as_ref()
             .map(driver_sandbox_template_from_public),
         gpu: spec.gpu,
+        gpu_device: spec.gpu_device.clone(),
     }
 }
 
@@ -1516,6 +1517,7 @@ impl ComputeDriver for NoopTestDriver {
                 driver_version: "test".to_string(),
                 default_image: "openshell/sandbox:test".to_string(),
                 supports_gpu: false,
+                gpu_count: 0,
             },
         ))
     }
@@ -1662,6 +1664,7 @@ mod tests {
                 driver_version: "test".to_string(),
                 default_image: "openshell/sandbox:test".to_string(),
                 supports_gpu: true,
+                gpu_count: 0,
             }))
         }
 
