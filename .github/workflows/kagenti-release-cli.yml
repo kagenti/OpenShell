@@ -1,0 +1,173 @@
+name: Release CLI
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Git tag to build (e.g. v0.0.36-kagenti.2)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  packages: read
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+  ZIG_VERSION: "0.14.1"
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  build-cli:
+    name: Build CLI (Linux ${{ matrix.arch }})
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            target: x86_64-unknown-linux-musl
+            zig_target: x86_64-linux-musl
+            zig_arch: x86_64
+          - arch: arm64
+            target: aarch64-unknown-linux-musl
+            zig_target: aarch64-linux-musl
+            zig_arch: aarch64
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add ${{ matrix.target }}
+
+      - name: Install Zig
+        run: |
+          curl -sSfL "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-${ZIG_VERSION}.tar.xz" | tar -xJ
+          echo "$PWD/zig-linux-x86_64-${ZIG_VERSION}" >> "$GITHUB_PATH"
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake
+
+      - name: Cache Rust target and registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cli-musl-${{ matrix.arch }}
+          cache-targets: "true"
+
+      - name: Set up Zig musl wrappers
+        run: |
+          set -euo pipefail
+          ZIG="$(which zig)"
+          ZIG_TARGET="${{ matrix.zig_target }}"
+          mkdir -p /tmp/zig-musl
+
+          for tool in cc c++; do
+            cat > "/tmp/zig-musl/${tool}" << WRAPPER
+          #!/bin/bash
+          args=()
+          for arg in "\$@"; do
+            case "\$arg" in
+              --target=*) ;;
+              *) args+=("\$arg") ;;
+            esac
+          done
+          exec "${ZIG}" ${tool} --target=${ZIG_TARGET} "\${args[@]}"
+          WRAPPER
+            chmod +x "/tmp/zig-musl/${tool}"
+          done
+
+          TARGET_ENV=$(echo "${{ matrix.target }}" | tr '-' '_')
+          TARGET_ENV_UPPER=${TARGET_ENV^^}
+
+          echo "CC_${TARGET_ENV}=/tmp/zig-musl/cc" >> "$GITHUB_ENV"
+          echo "CXX_${TARGET_ENV}=/tmp/zig-musl/c++" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_${TARGET_ENV_UPPER}_LINKER=/tmp/zig-musl/cc" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_${TARGET_ENV_UPPER}_RUSTFLAGS=-Clink-self-contained=no" >> "$GITHUB_ENV"
+          echo "CXXSTDLIB=c++" >> "$GITHUB_ENV"
+
+      - name: Patch workspace version
+        run: |
+          set -euo pipefail
+          VERSION="${RELEASE_TAG#v}"
+          sed -i -E '/^\[workspace\.package\]/,/^\[/{s/^version[[:space:]]*=[[:space:]]*".*"/version = "'"${VERSION}"'"/}' Cargo.toml
+          grep "^version" Cargo.toml | head -1
+
+      - name: Build openshell-cli
+        run: |
+          cargo build --release --target ${{ matrix.target }} -p openshell-cli --features bundled-z3
+
+      - name: Package binary
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          tar -czf artifacts/openshell-${{ matrix.target }}.tar.gz \
+            -C target/${{ matrix.target }}/release openshell
+          ls -lh artifacts/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-linux-${{ matrix.arch }}
+          path: artifacts/*.tar.gz
+          retention-days: 30
+
+  release:
+    name: Create Release
+    needs: [build-cli]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+
+      - name: Generate checksums
+        working-directory: release
+        run: |
+          sha256sum *.tar.gz > openshell-checksums-sha256.txt
+          cat openshell-checksums-sha256.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: OpenShell ${{ env.RELEASE_TAG }}
+          tag_name: ${{ env.RELEASE_TAG }}
+          prerelease: ${{ contains(env.RELEASE_TAG, '-') }}
+          generate_release_notes: true
+          body: |
+            ## OpenShell CLI ${{ env.RELEASE_TAG }}
+
+            ### Download
+
+            | Platform | Architecture | File |
+            |----------|-------------|------|
+            | Linux | x86_64 | `openshell-x86_64-unknown-linux-musl.tar.gz` |
+            | Linux | aarch64 | `openshell-aarch64-unknown-linux-musl.tar.gz` |
+
+            ### Install
+
+            ```bash
+            # amd64
+            curl -LsSf https://github.com/kagenti/OpenShell/releases/download/${{ env.RELEASE_TAG }}/openshell-x86_64-unknown-linux-musl.tar.gz | tar xz
+            sudo mv openshell /usr/local/bin/
+
+            # arm64
+            curl -LsSf https://github.com/kagenti/OpenShell/releases/download/${{ env.RELEASE_TAG }}/openshell-aarch64-unknown-linux-musl.tar.gz | tar xz
+            sudo mv openshell /usr/local/bin/
+            ```
+
+          files: |
+            release/openshell-x86_64-unknown-linux-musl.tar.gz
+            release/openshell-aarch64-unknown-linux-musl.tar.gz
+            release/openshell-checksums-sha256.txt
