@@ -131,6 +131,8 @@ jobs:
           sed -i '' -E '/^\[workspace\.package\]/,/^\[/{s/^version[[:space:]]*=[[:space:]]*".*"/version = "'"${VERSION}"'"/;}' Cargo.toml
 
       - name: Build openshell-cli
+        env:
+          CXXFLAGS: "-std=c++17"
         run: cargo build --release -p openshell-cli --features bundled-z3
 
       - name: Package binary
