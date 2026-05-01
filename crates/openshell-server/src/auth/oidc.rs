@@ -33,6 +33,8 @@ pub const AUTH_SOURCE_SANDBOX_SECRET: &str = "sandbox-secret";
 /// Truly unauthenticated methods — health probes and infrastructure.
 const UNAUTHENTICATED_METHODS: &[&str] = &[
     "/openshell.v1.OpenShell/Health",
+    "/openshell.v1.OpenShell/ConnectSupervisor",
+    "/openshell.v1.OpenShell/RelayStream",
     "/openshell.inference.v1.Inference/Health",
 ];
 
