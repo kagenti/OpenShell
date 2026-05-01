@@ -50,7 +50,7 @@ jobs:
           tags: |
             type=ref,event=tag
             type=sha,prefix={{branch}}-,enable=${{ github.ref_type != 'tag' }}
-            type=raw,value=latest,enable=${{ (github.ref_type == 'tag' && startsWith(github.ref_name, 'v')) || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' }}
+            type=raw,value=latest,enable=${{ (github.ref_type == 'tag' && startsWith(github.ref_name, 'v')) || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/mvp' }}
 
       - name: Wait before retry
         if: steps.meta.outcome == 'failure'
@@ -67,7 +67,7 @@ jobs:
           tags: |
             type=ref,event=tag
             type=sha,prefix={{branch}}-,enable=${{ github.ref_type != 'tag' }}
-            type=raw,value=latest,enable=${{ (github.ref_type == 'tag' && startsWith(github.ref_name, 'v')) || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' }}
+            type=raw,value=latest,enable=${{ (github.ref_type == 'tag' && startsWith(github.ref_name, 'v')) || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/mvp' }}
 
       - name: Build and push gateway image
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7.1.0
@@ -116,7 +116,7 @@ jobs:
           tags: |
             type=ref,event=tag
             type=sha,prefix={{branch}}-,enable=${{ github.ref_type != 'tag' }}
-            type=raw,value=latest,enable=${{ (github.ref_type == 'tag' && startsWith(github.ref_name, 'v')) || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' }}
+            type=raw,value=latest,enable=${{ (github.ref_type == 'tag' && startsWith(github.ref_name, 'v')) || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/mvp' }}
 
       - name: Wait before retry
         if: steps.meta.outcome == 'failure'
@@ -133,7 +133,7 @@ jobs:
           tags: |
             type=ref,event=tag
             type=sha,prefix={{branch}}-,enable=${{ github.ref_type != 'tag' }}
-            type=raw,value=latest,enable=${{ (github.ref_type == 'tag' && startsWith(github.ref_name, 'v')) || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' }}
+            type=raw,value=latest,enable=${{ (github.ref_type == 'tag' && startsWith(github.ref_name, 'v')) || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/mvp' }}
 
       - name: Build and push supervisor image
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7.1.0
