@@ -55,7 +55,13 @@ jobs:
           echo "$PWD/zig-x86_64-linux-${ZIG_VERSION}" >> "$GITHUB_PATH"
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake libclang-dev
+          if [ "${{ matrix.arch }}" = "arm64" ]; then
+            sudo dpkg --add-architecture arm64
+            sudo apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+          fi
 
       - name: Cache Rust target and registry
         uses: Swatinem/rust-cache@v2
@@ -93,6 +99,11 @@ jobs:
           echo "CARGO_TARGET_${TARGET_ENV_UPPER}_LINKER=/tmp/zig-musl/cc" >> "$GITHUB_ENV"
           echo "CARGO_TARGET_${TARGET_ENV_UPPER}_RUSTFLAGS=-Clink-self-contained=no" >> "$GITHUB_ENV"
           echo "CXXSTDLIB=c++" >> "$GITHUB_ENV"
+
+          # Tell bindgen/clang the correct target triple and sysroot for cross-compilation
+          if [ "${{ matrix.arch }}" = "arm64" ]; then
+            echo "BINDGEN_EXTRA_CLANG_ARGS=--target=aarch64-unknown-linux-musl --sysroot=/usr/aarch64-linux-gnu" >> "$GITHUB_ENV"
+          fi
 
       - name: Patch workspace version
         run: |
