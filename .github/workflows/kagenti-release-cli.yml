@@ -134,7 +134,7 @@ jobs:
 
       - name: Build openshell-cli
         env:
-          CXXFLAGS: "-std=c++17"
+          CXXFLAGS: "-std=c++20"
           READ_ONLY_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: cargo build --release -p openshell-cli --features bundled-z3
 
