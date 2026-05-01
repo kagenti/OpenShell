@@ -108,7 +108,7 @@ jobs:
 
   build-cli-macos:
     name: Build CLI (macOS arm64)
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 60
     steps:
       - name: Checkout
@@ -134,7 +134,6 @@ jobs:
 
       - name: Build openshell-cli
         env:
-          CXXFLAGS: "-std=c++20"
           READ_ONLY_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: cargo build --release -p openshell-cli --features bundled-z3
 
