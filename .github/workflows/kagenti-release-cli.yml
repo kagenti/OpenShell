@@ -22,19 +22,8 @@ env:
   CARGO_INCREMENTAL: "0"
 
 jobs:
-  build-cli:
-    name: Build CLI (Linux ${{ matrix.arch }})
-    strategy:
-      matrix:
-        include:
-          - arch: amd64
-            target: x86_64-unknown-linux-musl
-            zig_target: x86_64-linux-musl
-            zig_arch: x86_64
-          - arch: arm64
-            target: aarch64-unknown-linux-musl
-            zig_target: aarch64-linux-musl
-            zig_arch: aarch64
+  build-cli-linux:
+    name: Build CLI (Linux amd64)
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -47,7 +36,7 @@ jobs:
       - name: Install Rust toolchain
         run: |
           rustup toolchain install stable --profile minimal
-          rustup target add ${{ matrix.target }}
+          rustup target add x86_64-unknown-linux-musl
 
       - name: Install Zig
         run: |
@@ -55,25 +44,19 @@ jobs:
           echo "$PWD/zig-x86_64-linux-${ZIG_VERSION}" >> "$GITHUB_PATH"
 
       - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake libclang-dev
-          if [ "${{ matrix.arch }}" = "arm64" ]; then
-            sudo dpkg --add-architecture arm64
-            sudo apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross
-          fi
+        run: sudo apt-get update && sudo apt-get install -y cmake libclang-dev
 
       - name: Cache Rust target and registry
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: cli-musl-${{ matrix.arch }}
+          shared-key: cli-musl-amd64
           cache-targets: "true"
 
       - name: Set up Zig musl wrappers
         run: |
           set -euo pipefail
           ZIG="$(which zig)"
-          ZIG_TARGET="${{ matrix.zig_target }}"
+          ZIG_TARGET="x86_64-linux-musl"
           mkdir -p /tmp/zig-musl
 
           for tool in cc c++; do
@@ -91,49 +74,83 @@ jobs:
             chmod +x "/tmp/zig-musl/${tool}"
           done
 
-          TARGET_ENV=$(echo "${{ matrix.target }}" | tr '-' '_')
-          TARGET_ENV_UPPER=${TARGET_ENV^^}
-
-          echo "CC_${TARGET_ENV}=/tmp/zig-musl/cc" >> "$GITHUB_ENV"
-          echo "CXX_${TARGET_ENV}=/tmp/zig-musl/c++" >> "$GITHUB_ENV"
-          echo "CARGO_TARGET_${TARGET_ENV_UPPER}_LINKER=/tmp/zig-musl/cc" >> "$GITHUB_ENV"
-          echo "CARGO_TARGET_${TARGET_ENV_UPPER}_RUSTFLAGS=-Clink-self-contained=no" >> "$GITHUB_ENV"
+          echo "CC_x86_64_unknown_linux_musl=/tmp/zig-musl/cc" >> "$GITHUB_ENV"
+          echo "CXX_x86_64_unknown_linux_musl=/tmp/zig-musl/c++" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=/tmp/zig-musl/cc" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS=-Clink-self-contained=no" >> "$GITHUB_ENV"
           echo "CXXSTDLIB=c++" >> "$GITHUB_ENV"
-
-          # Tell bindgen/clang the correct target triple and sysroot for cross-compilation
-          if [ "${{ matrix.arch }}" = "arm64" ]; then
-            echo "BINDGEN_EXTRA_CLANG_ARGS=--target=aarch64-unknown-linux-musl --sysroot=/usr/aarch64-linux-gnu" >> "$GITHUB_ENV"
-          fi
 
       - name: Patch workspace version
         run: |
           set -euo pipefail
           VERSION="${RELEASE_TAG#v}"
           sed -i -E '/^\[workspace\.package\]/,/^\[/{s/^version[[:space:]]*=[[:space:]]*".*"/version = "'"${VERSION}"'"/}' Cargo.toml
-          grep "^version" Cargo.toml | head -1
 
       - name: Build openshell-cli
-        run: |
-          cargo build --release --target ${{ matrix.target }} -p openshell-cli --features bundled-z3
+        run: cargo build --release --target x86_64-unknown-linux-musl -p openshell-cli --features bundled-z3
 
       - name: Package binary
         run: |
           set -euo pipefail
           mkdir -p artifacts
-          tar -czf artifacts/openshell-${{ matrix.target }}.tar.gz \
-            -C target/${{ matrix.target }}/release openshell
+          tar -czf artifacts/openshell-x86_64-unknown-linux-musl.tar.gz \
+            -C target/x86_64-unknown-linux-musl/release openshell
           ls -lh artifacts/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: cli-linux-${{ matrix.arch }}
+          name: cli-linux-amd64
+          path: artifacts/*.tar.gz
+          retention-days: 30
+
+  build-cli-macos:
+    name: Build CLI (macOS arm64)
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Cache Rust target and registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cli-macos-arm64
+          cache-targets: "true"
+
+      - name: Patch workspace version
+        run: |
+          set -euo pipefail
+          VERSION="${RELEASE_TAG#v}"
+          sed -i '' -E '/^\[workspace\.package\]/,/^\[/{s/^version[[:space:]]*=[[:space:]]*".*"/version = "'"${VERSION}"'"/;}' Cargo.toml
+
+      - name: Build openshell-cli
+        run: cargo build --release -p openshell-cli --features bundled-z3
+
+      - name: Package binary
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          tar -czf artifacts/openshell-aarch64-apple-darwin.tar.gz \
+            -C target/release openshell
+          ls -lh artifacts/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-macos-arm64
           path: artifacts/*.tar.gz
           retention-days: 30
 
   release:
     name: Create Release
-    needs: [build-cli]
+    needs: [build-cli-linux, build-cli-macos]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -164,21 +181,21 @@ jobs:
             | Platform | Architecture | File |
             |----------|-------------|------|
             | Linux | x86_64 | `openshell-x86_64-unknown-linux-musl.tar.gz` |
-            | Linux | aarch64 | `openshell-aarch64-unknown-linux-musl.tar.gz` |
+            | macOS | Apple Silicon | `openshell-aarch64-apple-darwin.tar.gz` |
 
             ### Install
 
             ```bash
-            # amd64
+            # Linux amd64
             curl -LsSf https://github.com/kagenti/OpenShell/releases/download/${{ env.RELEASE_TAG }}/openshell-x86_64-unknown-linux-musl.tar.gz | tar xz
             sudo mv openshell /usr/local/bin/
 
-            # arm64
-            curl -LsSf https://github.com/kagenti/OpenShell/releases/download/${{ env.RELEASE_TAG }}/openshell-aarch64-unknown-linux-musl.tar.gz | tar xz
+            # macOS Apple Silicon
+            curl -LsSf https://github.com/kagenti/OpenShell/releases/download/${{ env.RELEASE_TAG }}/openshell-aarch64-apple-darwin.tar.gz | tar xz
             sudo mv openshell /usr/local/bin/
             ```
 
           files: |
             release/openshell-x86_64-unknown-linux-musl.tar.gz
-            release/openshell-aarch64-unknown-linux-musl.tar.gz
+            release/openshell-aarch64-apple-darwin.tar.gz
             release/openshell-checksums-sha256.txt
