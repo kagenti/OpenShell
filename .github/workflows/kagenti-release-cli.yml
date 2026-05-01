@@ -87,6 +87,8 @@ jobs:
           sed -i -E '/^\[workspace\.package\]/,/^\[/{s/^version[[:space:]]*=[[:space:]]*".*"/version = "'"${VERSION}"'"/}' Cargo.toml
 
       - name: Build openshell-cli
+        env:
+          READ_ONLY_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: cargo build --release --target x86_64-unknown-linux-musl -p openshell-cli --features bundled-z3
 
       - name: Package binary
@@ -133,7 +135,7 @@ jobs:
       - name: Build openshell-cli
         env:
           CXXFLAGS: "-std=c++17"
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          READ_ONLY_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: cargo build --release -p openshell-cli --features bundled-z3
 
       - name: Package binary
