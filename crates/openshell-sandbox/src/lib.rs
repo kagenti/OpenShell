@@ -1878,7 +1878,7 @@ fn prepare_read_write_path(path: &std::path::Path, uid: Option<nix::unistd::Uid>
         // 0700, which prevents the unprivileged sandbox user from writing.
         if meta.is_dir() {
             let mode = meta.permissions().mode();
-            let owned_by_target = uid.is_some_and(|u| u.as_raw() == meta.st_uid());
+            let owned_by_target = uid.is_some_and(|u| u.as_raw() == meta.uid());
             let world_writable = mode & 0o002 != 0;
             let user_writable = owned_by_target && (mode & 0o200 != 0);
 
