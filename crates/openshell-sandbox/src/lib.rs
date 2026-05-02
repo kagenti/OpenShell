@@ -1856,7 +1856,9 @@ fn validate_sandbox_user(policy: &SandboxPolicy) -> Result<()> {
 /// still needs to be chowned to the sandbox user/group. Existing paths keep
 /// their image-defined ownership.
 #[cfg(unix)]
-fn prepare_read_write_path(path: &std::path::Path) -> Result<bool> {
+fn prepare_read_write_path(path: &std::path::Path, uid: Option<nix::unistd::Uid>) -> Result<bool> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
     // SECURITY: use symlink_metadata (lstat) to inspect each path *before*
     // calling chown. chown follows symlinks, so a malicious container image
     // could place a symlink (e.g. /sandbox -> /etc/shadow) to trick the
@@ -1871,10 +1873,28 @@ fn prepare_read_write_path(path: &std::path::Path) -> Result<bool> {
             ));
         }
 
-        debug!(
-            path = %path.display(),
-            "Preserving ownership for existing read_write path"
-        );
+        // Ensure existing read_write directories are accessible by the sandbox
+        // user. Container images may ship directories like /tmp as root:root
+        // 0700, which prevents the unprivileged sandbox user from writing.
+        if meta.is_dir() {
+            let mode = meta.permissions().mode();
+            let owned_by_target = uid.is_some_and(|u| u.as_raw() == meta.st_uid());
+            let world_writable = mode & 0o002 != 0;
+            let user_writable = owned_by_target && (mode & 0o200 != 0);
+
+            if !world_writable && !user_writable {
+                let new_mode = 0o1777;
+                debug!(
+                    path = %path.display(),
+                    old_mode = format!("{:04o}", mode & 0o7777),
+                    new_mode = format!("{:04o}", new_mode),
+                    "Fixing permissions on existing read_write directory"
+                );
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(new_mode))
+                    .into_diagnostic()?;
+            }
+        }
+
         Ok(false)
     } else {
         debug!(path = %path.display(), "Creating read_write directory");
@@ -1930,8 +1950,9 @@ fn prepare_filesystem(policy: &SandboxPolicy) -> Result<()> {
     };
 
     // Create missing read_write paths and only chown the ones we created.
+    // For existing paths, ensure they are writable by the sandbox user.
     for path in &policy.filesystem.read_write {
-        if prepare_read_write_path(path)? {
+        if prepare_read_write_path(path, uid)? {
             debug!(
                 path = %path.display(),
                 ?uid,
@@ -2725,7 +2746,7 @@ filesystem_policy:
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("missing").join("nested");
 
-        assert!(prepare_read_write_path(&missing).unwrap());
+        assert!(prepare_read_write_path(&missing, None).unwrap());
         assert!(missing.is_dir());
     }
 
@@ -2736,7 +2757,7 @@ filesystem_policy:
         let existing = dir.path().join("existing");
         std::fs::create_dir(&existing).unwrap();
 
-        assert!(!prepare_read_write_path(&existing).unwrap());
+        assert!(!prepare_read_write_path(&existing, None).unwrap());
         assert!(existing.is_dir());
     }
 
@@ -2749,7 +2770,7 @@ filesystem_policy:
         std::fs::create_dir(&target).unwrap();
         symlink(&target, &link).unwrap();
 
-        let error = prepare_read_write_path(&link).unwrap_err();
+        let error = prepare_read_write_path(&link, None).unwrap_err();
         assert!(
             error
                 .to_string()
@@ -2791,5 +2812,24 @@ filesystem_policy:
         let after = std::fs::metadata(&existing).unwrap();
         assert_eq!(after.uid(), before.uid());
         assert_eq!(after.gid(), before.gid());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepare_read_write_path_fixes_inaccessible_tmp() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path().join("tmp");
+        std::fs::create_dir(&tmp).unwrap();
+        // Simulate container image shipping /tmp as root:root 0700
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        // Use a UID different from the owner to trigger the fix
+        let fake_uid = nix::unistd::Uid::from_raw(998);
+        assert!(!prepare_read_write_path(&tmp, Some(fake_uid)).unwrap());
+
+        let meta = std::fs::metadata(&tmp).unwrap();
+        assert_eq!(meta.permissions().mode() & 0o7777, 0o1777);
     }
 }
