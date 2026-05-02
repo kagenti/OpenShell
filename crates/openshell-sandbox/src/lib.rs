@@ -1812,6 +1812,13 @@ async fn load_policy(
         // The initial load uses pid=0 (no symlink resolution) because the
         // container hasn't started yet. After the entrypoint spawns, the
         // engine is rebuilt with the real PID for symlink resolution.
+        // Normalize process identity before conversion so `prepare_filesystem`
+        // and `drop_privileges` see the correct user/group.  The server-side
+        // `handle_update_config` does this, but if the supervisor fetches the
+        // policy before the server has normalized it (or if the policy was
+        // loaded from disk), the fields may still be empty.
+        openshell_policy::ensure_sandbox_process_identity(&mut proto_policy);
+
         info!("Creating OPA engine from proto policy data");
         let opa_engine = Some(Arc::new(OpaEngine::from_proto(&proto_policy)?));
 
@@ -2045,8 +2052,16 @@ fn prepare_filesystem(policy: &SandboxPolicy) -> Result<()> {
         _ => None,
     };
 
-    // If no user/group configured, nothing to do
+    // If no user/group is configured and we are running as root, fall back to
+    // "sandbox:sandbox" — same logic as `drop_privileges` so the filesystem is
+    // prepared for the user that will actually own the process.
     if user_name.is_none() && group_name.is_none() {
+        if nix::unistd::geteuid().is_root() {
+            let mut fallback = policy.clone();
+            fallback.process.run_as_user = Some("sandbox".into());
+            fallback.process.run_as_group = Some("sandbox".into());
+            return prepare_filesystem(&fallback);
+        }
         return Ok(());
     }
 
