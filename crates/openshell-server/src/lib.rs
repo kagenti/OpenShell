@@ -557,6 +557,22 @@ async fn build_compute_runtime(
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| openshell_core::config::DEFAULT_SUPERVISOR_IMAGE.to_string());
 
+            // TLS client cert paths for sandbox mTLS. When all three are
+            // set, the Podman driver bind-mounts them into sandbox
+            // containers and switches the endpoint to https://.
+            let podman_tls_ca = std::env::var("OPENSHELL_PODMAN_TLS_CA")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(std::path::PathBuf::from);
+            let podman_tls_cert = std::env::var("OPENSHELL_PODMAN_TLS_CERT")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(std::path::PathBuf::from);
+            let podman_tls_key = std::env::var("OPENSHELL_PODMAN_TLS_KEY")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(std::path::PathBuf::from);
+
             ComputeRuntime::new_podman(
                 openshell_driver_podman::PodmanComputeConfig {
                     socket_path,
@@ -566,12 +582,14 @@ async fn build_compute_runtime(
                     gateway_port: config.bind_address.port(),
                     sandbox_ssh_socket_path: config.sandbox_ssh_socket_path.clone(),
                     network_name,
-                    ssh_listen_addr: format!("0.0.0.0:{}", config.sandbox_ssh_port),
                     ssh_port: config.sandbox_ssh_port,
                     ssh_handshake_secret: config.ssh_handshake_secret.clone(),
                     ssh_handshake_skew_secs: config.ssh_handshake_skew_secs,
                     stop_timeout_secs,
                     supervisor_image,
+                    guest_tls_ca: podman_tls_ca,
+                    guest_tls_cert: podman_tls_cert,
+                    guest_tls_key: podman_tls_key,
                 },
                 store,
                 sandbox_index,

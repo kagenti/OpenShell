@@ -867,6 +867,30 @@ fn is_loopback_gateway_endpoint(endpoint: &str) -> bool {
     }
 }
 
+/// Check whether mTLS client certs exist on disk for the gateway that
+/// would serve this endpoint.
+///
+/// Loopback endpoints (`localhost`, `127.0.0.1`, `::1`) resolve to the
+/// `"openshell"` gateway name, matching the convention used by
+/// `init-pki.sh` and the TLS cert resolver in `tls.rs`.
+fn mtls_certs_exist_for_endpoint(name: &str, endpoint: &str) -> bool {
+    let cert_name = if is_loopback_gateway_endpoint(endpoint) {
+        "openshell"
+    } else {
+        name
+    };
+    openshell_core::paths::xdg_config_dir().is_ok_and(|d| {
+        let mtls = d
+            .join("openshell")
+            .join("gateways")
+            .join(cert_name)
+            .join("mtls");
+        mtls.join("ca.crt").is_file()
+            && mtls.join("tls.crt").is_file()
+            && mtls.join("tls.key").is_file()
+    })
+}
+
 fn plaintext_gateway_is_remote(endpoint: &str, remote: Option<&str>, local: bool) -> bool {
     if local {
         return false;
@@ -897,6 +921,7 @@ fn plaintext_gateway_metadata(
         remote_host,
         resolved_host,
         auth_mode: Some("plaintext".to_string()),
+        client_lifecycle_managed: Some(false),
         ..Default::default()
     }
 }
@@ -1026,9 +1051,14 @@ pub async fn gateway_add(
     }
 
     // Derive a gateway name from the hostname when none is provided.
+    // Loopback endpoints use the canonical "openshell" name, matching the
+    // convention in init-pki.sh, default_tls_dir, and bootstrap.
     let derived_name;
     let name = if let Some(n) = name {
         n
+    } else if is_loopback_gateway_endpoint(&endpoint) {
+        derived_name = "openshell".to_string();
+        &derived_name
     } else {
         // Parse out just the host portion of the URL.
         derived_name = url::Url::parse(&endpoint)
@@ -1136,12 +1166,45 @@ pub async fn gateway_add(
     }
 
     if endpoint.starts_with("http://") {
+        // Warn if mTLS certs exist for this gateway — the user likely
+        // meant to use https:// instead of http://.
+        let has_mtls_certs = mtls_certs_exist_for_endpoint(name, &endpoint);
+
+        if has_mtls_certs {
+            let https_endpoint = endpoint.replacen("http://", "https://", 1);
+            let suggestion = if is_loopback_gateway_endpoint(&endpoint) {
+                format!("openshell gateway add --local {https_endpoint}")
+            } else {
+                format!("openshell gateway add {https_endpoint}")
+            };
+            eprintln!(
+                "{} mTLS certificates found for gateway '{name}'. Did you mean to use https?",
+                "⚠".yellow().bold(),
+            );
+            eprintln!("  Try: {suggestion}");
+        }
+
         let metadata = plaintext_gateway_metadata(name, &endpoint, remote, local);
         let gateway_type = gateway_type_label(&metadata);
         let gateway_auth = gateway_auth_label(&metadata);
 
         store_gateway_metadata(name, &metadata)?;
         save_active_gateway(name)?;
+
+        // Verify the gateway is reachable.
+        let tls = TlsOptions::default();
+        match http_health_check(&endpoint, &tls).await {
+            Ok(Some(status)) if status.is_success() => {}
+            _ => {
+                eprintln!(
+                    "{} Gateway is not reachable at {endpoint}",
+                    "⚠".yellow().bold(),
+                );
+                if !has_mtls_certs {
+                    eprintln!("  Verify the gateway is running and the endpoint is correct.");
+                }
+            }
+        }
 
         eprintln!(
             "{} Gateway '{}' added and set as active",
@@ -1169,10 +1232,20 @@ pub async fn gateway_add(
         // is not registered.  Pass the endpoint port so the container can be
         // identified by its host port binding when multiple gateways run on
         // the same Docker host.
-        let endpoint_port = url::Url::parse(&endpoint).ok().and_then(|u| u.port());
-        eprintln!("• Extracting TLS certificates from gateway container...");
-        openshell_bootstrap::extract_and_store_pki(name, remote_opts.as_ref(), endpoint_port)
-            .await?;
+        //
+        // Skip extraction when client certs are already on disk (e.g.,
+        // RPM/systemd deployments where init-pki.sh pre-provisions them
+        // before the gateway starts).
+        let certs_on_disk = mtls_certs_exist_for_endpoint(name, &endpoint);
+
+        if certs_on_disk {
+            eprintln!("• TLS certificates already present, skipping extraction");
+        } else {
+            let endpoint_port = url::Url::parse(&endpoint).ok().and_then(|u| u.port());
+            eprintln!("• Extracting TLS certificates from gateway container...");
+            openshell_bootstrap::extract_and_store_pki(name, remote_opts.as_ref(), endpoint_port)
+                .await?;
+        }
 
         let (remote_host, resolved_host) = remote.map_or((None, None), |dest| {
             let ssh_host = extract_host_from_ssh_destination(dest);
@@ -1188,11 +1261,24 @@ pub async fn gateway_add(
             remote_host,
             resolved_host,
             auth_mode: Some("mtls".to_string()),
+            client_lifecycle_managed: Some(false),
             ..Default::default()
         };
 
         store_gateway_metadata(name, &metadata)?;
         save_active_gateway(name)?;
+
+        // Verify the gateway is reachable over mTLS.
+        let tls = TlsOptions::default().with_gateway_name(name);
+        match http_health_check(&endpoint, &tls).await {
+            Ok(Some(status)) if status.is_success() => {}
+            _ => {
+                eprintln!(
+                    "{} Gateway is not reachable at {endpoint}. Verify the gateway is running.",
+                    "⚠".yellow().bold(),
+                );
+            }
+        }
 
         eprintln!(
             "{} Gateway '{}' added and set as active",
@@ -1205,7 +1291,15 @@ pub async fn gateway_add(
             "Type:".dimmed(),
             if local { "local" } else { "remote" },
         );
-        eprintln!("{} TLS certificates extracted", "✓".green().bold());
+        eprintln!(
+            "{} TLS certificates {}",
+            "✓".green().bold(),
+            if certs_on_disk {
+                "already present"
+            } else {
+                "extracted"
+            }
+        );
     } else {
         // Cloud (edge-authenticated) gateway.
         let metadata = GatewayMetadata {
@@ -1213,6 +1307,7 @@ pub async fn gateway_add(
             gateway_endpoint: endpoint.clone(),
             is_remote: true,
             auth_mode: Some("cloudflare_jwt".to_string()),
+            client_lifecycle_managed: Some(false),
             ..Default::default()
         };
 
@@ -1738,10 +1833,20 @@ fn resolve_gateway_control_target_from(
     }
 
     match metadata {
-        Some(metadata) if metadata.is_remote => metadata.remote_host.map_or(
+        // Not client-managed (`gateway add`) — the gateway lifecycle is
+        // managed externally (e.g. systemd, Podman, bare-metal); only
+        // remove the local registration metadata on destroy/stop.
+        Some(ref m) if m.client_lifecycle_managed == Some(false) => {
+            GatewayControlTarget::ExternalRegistration
+        }
+        // Remote gateway with SSH destination — managed remote container.
+        Some(ref m) if m.is_remote => m.remote_host.clone().map_or(
             GatewayControlTarget::ExternalRegistration,
             GatewayControlTarget::Remote,
         ),
+        // Client-managed (`gateway start`) or legacy metadata (no
+        // `client_lifecycle_managed` field) — treat as a
+        // locally-managed container.
         _ => GatewayControlTarget::Local,
     }
 }
@@ -5935,6 +6040,7 @@ mod tests {
             gateway_endpoint: endpoint.to_string(),
             is_remote: true,
             auth_mode: Some("cloudflare_jwt".to_string()),
+            client_lifecycle_managed: Some(false),
             ..Default::default()
         }
     }
@@ -6336,6 +6442,49 @@ mod tests {
     }
 
     #[test]
+    fn resolve_gateway_control_target_non_managed_loopback_is_external() {
+        // A gateway registered via `gateway add http://localhost:8080` should
+        // be classified as an external registration, not a local container.
+        let metadata = GatewayMetadata {
+            name: "localhost".to_string(),
+            gateway_endpoint: "http://localhost:8080".to_string(),
+            auth_mode: Some("plaintext".to_string()),
+            client_lifecycle_managed: Some(false),
+            ..Default::default()
+        };
+        let target = resolve_gateway_control_target_from(Some(metadata), None);
+        assert!(matches!(target, GatewayControlTarget::ExternalRegistration));
+    }
+
+    #[test]
+    fn resolve_gateway_control_target_managed_gateway_is_local() {
+        // A gateway deployed via `gateway start` should be classified as local.
+        let metadata = GatewayMetadata {
+            name: "openshell".to_string(),
+            gateway_endpoint: "https://127.0.0.1:8080".to_string(),
+            gateway_port: 8080,
+            client_lifecycle_managed: Some(true),
+            ..Default::default()
+        };
+        let target = resolve_gateway_control_target_from(Some(metadata), None);
+        assert!(matches!(target, GatewayControlTarget::Local));
+    }
+
+    #[test]
+    fn resolve_gateway_control_target_legacy_metadata_defaults_to_local() {
+        // Legacy metadata without the `client_lifecycle_managed` field
+        // should preserve the existing behavior: non-remote → Local.
+        let metadata = GatewayMetadata {
+            name: "openshell".to_string(),
+            gateway_endpoint: "https://127.0.0.1:8080".to_string(),
+            gateway_port: 8080,
+            ..Default::default()
+        };
+        let target = resolve_gateway_control_target_from(Some(metadata), None);
+        assert!(matches!(target, GatewayControlTarget::Local));
+    }
+
+    #[test]
     fn gateway_select_uses_explicit_name_without_prompting() {
         let tmpdir = tempfile::tempdir().expect("create tmpdir");
         with_tmp_xdg(tmpdir.path(), || {
@@ -6486,6 +6635,7 @@ mod tests {
 
     #[test]
     fn gateway_add_registers_plaintext_loopback_gateway_without_local_flag() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let tmpdir = tempfile::tempdir().expect("create tmpdir");
         with_tmp_xdg(tmpdir.path(), || {
             let runtime = tokio::runtime::Runtime::new().expect("create runtime");
@@ -6505,16 +6655,20 @@ mod tests {
                 .expect("register plaintext gateway");
             });
 
-            let metadata = load_gateway_metadata("127.0.0.1").expect("load stored gateway");
+            // Loopback endpoints derive the canonical "openshell" gateway
+            // name, matching init-pki.sh and default_tls_dir conventions.
+            let metadata = load_gateway_metadata("openshell").expect("load stored gateway");
             assert_eq!(metadata.auth_mode.as_deref(), Some("plaintext"));
             assert!(!metadata.is_remote);
+            assert_eq!(metadata.client_lifecycle_managed, Some(false));
             assert_eq!(metadata.gateway_endpoint, "http://127.0.0.1:8080");
-            assert_eq!(load_active_gateway().as_deref(), Some("127.0.0.1"));
+            assert_eq!(load_active_gateway().as_deref(), Some("openshell"));
         });
     }
 
     #[test]
     fn gateway_add_respects_local_flag_for_plaintext_registrations() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let tmpdir = tempfile::tempdir().expect("create tmpdir");
         with_tmp_xdg(tmpdir.path(), || {
             let runtime = tokio::runtime::Runtime::new().expect("create runtime");
@@ -6537,6 +6691,7 @@ mod tests {
             let metadata = load_gateway_metadata("dev-http").expect("load stored gateway");
             assert_eq!(metadata.auth_mode.as_deref(), Some("plaintext"));
             assert!(!metadata.is_remote);
+            assert_eq!(metadata.client_lifecycle_managed, Some(false));
             assert_eq!(metadata.gateway_endpoint, "http://gateway.example.com:8080");
             assert_eq!(load_active_gateway().as_deref(), Some("dev-http"));
         });

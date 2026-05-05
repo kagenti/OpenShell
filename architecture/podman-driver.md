@@ -100,7 +100,19 @@ sequenceDiagram
     C->>C: entrypoint: /opt/openshell/bin/openshell-sandbox
 ```
 
-The supervisor image is a `FROM scratch` image containing only the prebuilt `openshell-sandbox` binary. It is built by the `supervisor-output` target in `deploy/docker/Dockerfile.images`. The `image_volumes` field in the container spec mounts this image's filesystem at `/opt/openshell/bin` with `rw: false`, making it a read-only overlay that the sandbox cannot tamper with.
+The supervisor image is a `FROM scratch` image containing only the prebuilt `openshell-sandbox` binary. It is built by the `supervisor` target in `deploy/docker/Dockerfile.images`. The `image_volumes` field in the container spec mounts this image's filesystem at `/opt/openshell/bin` with `rw: false`, making it a read-only overlay that the sandbox cannot tamper with.
+
+## TLS
+
+When the Podman driver's TLS configuration is set (`tls_ca`, `tls_cert`, `tls_key` in `PodmanComputeConfig`), the driver:
+
+1. Switches the auto-detected endpoint scheme from `http://` to `https://`
+2. Bind-mounts the client cert files (read-only) into the container at `/etc/openshell/tls/client/`
+3. Sets `OPENSHELL_TLS_CA`, `OPENSHELL_TLS_CERT`, `OPENSHELL_TLS_KEY` env vars pointing to the container-side paths
+
+The supervisor reads these env vars and uses them to establish an mTLS connection back to the gateway.
+
+The RPM packaging auto-generates a self-signed PKI on first start via `init-pki.sh`. Client certs are placed in the CLI auto-discovery directory (`~/.config/openshell/gateways/openshell/mtls/`) so the CLI connects with mTLS without manual configuration. See `deploy/rpm/CONFIGURATION.md` for the full RPM configuration reference and `deploy/rpm/QUICKSTART.md` for the quick start guide.
 
 ## Network Model
 
@@ -158,7 +170,7 @@ The SSH handshake secret is injected via Podman's `secret_env` API rather than a
 | gRPC endpoint (`OPENSHELL_ENDPOINT`) | Plaintext env var, override-protected | Yes | Yes |
 | Supervisor relay socket path (`OPENSHELL_SSH_SOCKET_PATH`) | Plaintext env var, override-protected (same value as `PodmanComputeConfig::sandbox_ssh_socket_path`) | Yes | Yes |
 
-The `build_env()` function in `container.rs` inserts user-supplied variables first, then unconditionally overwrites all security-critical variables to prevent spoofing via sandbox templates: `OPENSHELL_SANDBOX`, `OPENSHELL_SANDBOX_ID`, `OPENSHELL_ENDPOINT`, `OPENSHELL_SSH_SOCKET_PATH`, `OPENSHELL_SSH_LISTEN_ADDR`, `OPENSHELL_SSH_HANDSHAKE_SKEW_SECS`, `OPENSHELL_CONTAINER_IMAGE`, `OPENSHELL_SANDBOX_COMMAND`.
+The `build_env()` function in `container.rs` inserts user-supplied variables first, then unconditionally overwrites all security-critical variables to prevent spoofing via sandbox templates: `OPENSHELL_SANDBOX`, `OPENSHELL_SANDBOX_ID`, `OPENSHELL_ENDPOINT`, `OPENSHELL_SSH_SOCKET_PATH`, `OPENSHELL_SSH_HANDSHAKE_SKEW_SECS`, `OPENSHELL_CONTAINER_IMAGE`, `OPENSHELL_SANDBOX_COMMAND`.
 
 The `PodmanComputeConfig::Debug` impl redacts the handshake secret as `[REDACTED]`.
 
