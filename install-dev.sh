@@ -16,6 +16,8 @@ GITHUB_URL="https://github.com/${REPO}"
 RELEASE_TAG="${OPENSHELL_VERSION:-dev}"
 CHECKSUMS_NAME="openshell-checksums-sha256.txt"
 LOCAL_GATEWAY_PORT="17670"
+HOMEBREW_TAP="nvidia/openshell"
+HOMEBREW_FORMULA_NAME="openshell"
 
 info() {
   printf '%s: %s\n' "$APP_NAME" "$*" >&2
@@ -269,6 +271,34 @@ install_deb_package() {
   fi
 }
 
+homebrew_formula_path() {
+  _tap="$1"
+  _formula="$2"
+
+  if ! as_target_user brew tap-info "$_tap" >/dev/null 2>&1; then
+    info "creating local Homebrew tap ${_tap}..."
+    as_target_user brew tap-new --no-git "$_tap" >/dev/null
+  fi
+
+  _tap_dir="$(as_target_user brew --repository "$_tap" 2>/dev/null || true)"
+  [ -n "$_tap_dir" ] || error "could not locate Homebrew tap ${_tap}"
+
+  _formula_dir="${_tap_dir}/Formula"
+  as_target_user mkdir -p "$_formula_dir"
+  printf '%s/%s.rb\n' "$_formula_dir" "$_formula"
+}
+
+patch_homebrew_formula() {
+  _formula_file="$1"
+  _patched_file="${_formula_file}.patched"
+
+  if grep -q 'entitlements.write <<~XML' "$_formula_file"; then
+    info "patching Homebrew formula for idempotent postinstall..."
+    sed 's/entitlements\.write <<~XML/entitlements.atomic_write <<~XML/' "$_formula_file" >"$_patched_file"
+    mv "$_patched_file" "$_formula_file"
+  fi
+}
+
 start_user_gateway() {
   info "restarting openshell-gateway user service as ${TARGET_USER}..."
 
@@ -386,19 +416,31 @@ install_macos_homebrew() {
   download_release_asset "$RELEASE_TAG" "openshell.rb" "$_formula_file" || {
     error "failed to download ${_formula_url}; the selected release may not include a Homebrew formula"
   }
+  chmod 0644 "$_formula_file"
+  patch_homebrew_formula "$_formula_file"
+
+  _tap_formula_file="$(homebrew_formula_path "$HOMEBREW_TAP" "$HOMEBREW_FORMULA_NAME")"
+  info "staging Homebrew formula in tap ${HOMEBREW_TAP}..."
+  cp "$_formula_file" "$_tap_formula_file"
+  chmod 0644 "$_tap_formula_file"
+  if [ "$(id -u)" -eq 0 ]; then
+    chown "$TARGET_USER" "$_tap_formula_file" 2>/dev/null || true
+  fi
+
+  _formula_ref="${HOMEBREW_TAP}/${HOMEBREW_FORMULA_NAME}"
 
   if as_target_user brew list --formula openshell >/dev/null 2>&1; then
     info "reinstalling OpenShell with Homebrew..."
-    as_target_user brew reinstall --formula "$_formula_file"
+    as_target_user brew reinstall --formula "$_formula_ref"
   else
     info "installing OpenShell with Homebrew..."
-    as_target_user brew install --formula "$_formula_file"
+    as_target_user brew install --formula "$_formula_ref"
   fi
 
   info "restarting OpenShell Homebrew service..."
-  if ! as_target_user brew services restart openshell; then
+  if ! as_target_user brew services restart "$_formula_ref"; then
     warn "could not restart the OpenShell Homebrew service"
-    info "restart it later with: brew services restart openshell"
+    info "restart it later with: brew services restart ${_formula_ref}"
     info "then register it with: openshell gateway add http://127.0.0.1:${LOCAL_GATEWAY_PORT} --local --name local"
     return 0
   fi
