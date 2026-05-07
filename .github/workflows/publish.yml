@@ -77,6 +77,7 @@ jobs:
           target: gateway
           push: true
           platforms: linux/amd64,linux/arm64
+          build-args: BUILD_FROM_SOURCE=1
           tags: ${{ steps.meta_retry.outputs.tags || steps.meta.outputs.tags }}
           labels: ${{ steps.meta_retry.outputs.labels || steps.meta.outputs.labels }}
           cache-from: type=gha,scope=gateway
@@ -143,6 +144,7 @@ jobs:
           target: supervisor
           push: true
           platforms: linux/amd64,linux/arm64
+          build-args: BUILD_FROM_SOURCE=1
           tags: ${{ steps.meta_retry.outputs.tags || steps.meta.outputs.tags }}
           labels: ${{ steps.meta_retry.outputs.labels || steps.meta.outputs.labels }}
           cache-from: type=gha,scope=supervisor
