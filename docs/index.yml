@@ -19,6 +19,8 @@ navigation:
   title: "How It Works"
 - folder: observability
   title: "Observability"
+- folder: kubernetes
+  title: "Kubernetes"
 - folder: reference
   title: "Reference"
 - folder: security
