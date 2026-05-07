@@ -278,14 +278,14 @@ struct Args {
     oidc_scopes_claim: String,
 
     /// Unix domain socket path to an external compute driver.
-    /// Use with `--driver external` to delegate ComputeDriver RPCs to a
+    /// Use with `--driver external` to delegate `ComputeDriver` RPCs to a
     /// pre-existing out-of-process driver (e.g. a sidecar container).
     #[arg(long, env = "OPENSHELL_COMPUTE_DRIVER_SOCKET")]
     compute_driver_socket: Option<PathBuf>,
 
     /// Unix domain socket path to a credentials driver.
     /// When set, the gateway delegates credential resolution to this
-    /// out-of-process driver via the CredentialsDriver gRPC contract.
+    /// out-of-process driver via the `CredentialsDriver` gRPC contract.
     #[arg(long, env = "OPENSHELL_CREDENTIALS_DRIVER_SOCKET")]
     credentials_driver_socket: Option<PathBuf>,
 }

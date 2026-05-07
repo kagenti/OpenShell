@@ -52,8 +52,7 @@ impl CredentialsDriverHandle {
             .await
             .map_err(|s| {
                 Error::execution(format!(
-                    "credentials driver ResolveCredential failed for '{}': {}",
-                    name, s
+                    "credentials driver ResolveCredential failed for '{name}': {s}"
                 ))
             })?;
         Ok(response.into_inner())
@@ -66,7 +65,7 @@ impl CredentialsDriverHandle {
             .list_credentials(tonic::Request::new(ListCredentialsRequest {}))
             .await
             .map_err(|s| {
-                Error::execution(format!("credentials driver ListCredentials failed: {}", s))
+                Error::execution(format!("credentials driver ListCredentials failed: {s}"))
             })?;
         Ok(response.into_inner())
     }

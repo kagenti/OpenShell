@@ -24,7 +24,7 @@ use tower::service_fn;
 ///
 /// Retries for up to 10 seconds to allow the sidecar time to start.
 #[cfg(unix)]
-pub(crate) async fn connect(socket_path: &std::path::Path) -> Result<Channel> {
+pub async fn connect(socket_path: &std::path::Path) -> Result<Channel> {
     let mut last_error: Option<String> = None;
     for _ in 0..100 {
         match connect_once(socket_path).await {

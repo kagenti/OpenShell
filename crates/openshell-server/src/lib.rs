@@ -207,12 +207,12 @@ pub async fn run_server(
     )
     .await?;
 
-    let credentials_driver = if !config.credentials_driver_socket.is_empty() {
+    let credentials_driver = if config.credentials_driver_socket.is_empty() {
+        None
+    } else {
         let socket_path = std::path::Path::new(&config.credentials_driver_socket);
         let handle = credentials::CredentialsDriverHandle::connect(socket_path).await?;
         Some(Arc::new(handle))
-    } else {
-        None
     };
 
     let state = Arc::new(ServerState::new(
