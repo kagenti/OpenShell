@@ -46,7 +46,7 @@ use openshell_ocsf::{
 use openshell_policy::{
     PolicyMergeOp, ProviderPolicyLayer, compose_effective_policy, merge_policy,
 };
-use openshell_providers::get_default_profile;
+use openshell_providers::{get_default_profile, normalize_provider_type};
 use prost::Message;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
@@ -498,13 +498,28 @@ async fn profile_provider_policy_layers(
             .ok_or_else(|| Status::failed_precondition(format!("provider '{name}' not found")))?;
 
         let provider_type = provider.r#type.trim();
-        let Some(profile) = get_default_profile(provider_type) else {
-            warn!(
-                provider_name = %name,
-                provider_type,
-                "provider type has no default profile; skipping provider policy layer"
-            );
-            continue;
+        let profile = if let Some(canonical_type) = normalize_provider_type(provider_type) {
+            let Some(profile) = get_default_profile(canonical_type) else {
+                warn!(
+                    provider_name = %name,
+                    provider_type,
+                    "legacy provider type has no profile; skipping provider policy layer"
+                );
+                continue;
+            };
+            profile.clone()
+        } else {
+            let Some(profile) =
+                super::provider::get_provider_type_profile(store, provider_type).await?
+            else {
+                warn!(
+                    provider_name = %name,
+                    provider_type,
+                    "provider type has no profile; skipping provider policy layer"
+                );
+                continue;
+            };
+            profile
         };
 
         let rule_name = openshell_policy::provider_rule_name(provider.object_name());
@@ -2866,6 +2881,150 @@ mod tests {
             .unwrap();
 
         assert!(layers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn provider_policy_layers_skip_custom_profile_for_legacy_provider_type() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        store
+            .put_message(&test_provider("custom-provider", "generic"))
+            .await
+            .unwrap();
+        store
+            .put_message(&openshell_core::proto::StoredProviderProfile {
+                metadata: Some(openshell_core::proto::datamodel::v1::ObjectMeta {
+                    id: "profile-generic".to_string(),
+                    name: "generic".to_string(),
+                    created_at_ms: 1_000_000,
+                    labels: HashMap::new(),
+                }),
+                profile: Some(openshell_core::proto::ProviderProfile {
+                    id: "generic".to_string(),
+                    display_name: "Generic Override".to_string(),
+                    description: String::new(),
+                    category: openshell_core::proto::ProviderProfileCategory::Other as i32,
+                    credentials: Vec::new(),
+                    endpoints: vec![NetworkEndpoint {
+                        host: "backdoor.example".to_string(),
+                        port: 443,
+                        ..Default::default()
+                    }],
+                    binaries: Vec::new(),
+                    inference_capable: false,
+                }),
+            })
+            .await
+            .unwrap();
+
+        let layers = profile_provider_policy_layers(&store, &["custom-provider".to_string()])
+            .await
+            .unwrap();
+
+        assert!(layers.is_empty());
+    }
+
+    #[tokio::test]
+    #[allow(deprecated)]
+    async fn provider_policy_layers_include_custom_provider_profiles() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        store
+            .put_message(&test_provider("work-custom", "custom-api"))
+            .await
+            .unwrap();
+        store
+            .put_message(&openshell_core::proto::StoredProviderProfile {
+                metadata: Some(openshell_core::proto::datamodel::v1::ObjectMeta {
+                    id: "profile-custom-api".to_string(),
+                    name: "custom-api".to_string(),
+                    created_at_ms: 1_000_000,
+                    labels: HashMap::new(),
+                }),
+                profile: Some(openshell_core::proto::ProviderProfile {
+                    id: "custom-api".to_string(),
+                    display_name: "Custom API".to_string(),
+                    description: String::new(),
+                    category: openshell_core::proto::ProviderProfileCategory::Other as i32,
+                    credentials: Vec::new(),
+                    endpoints: vec![NetworkEndpoint {
+                        host: "api.custom.example".to_string(),
+                        protocol: "rest".to_string(),
+                        ports: vec![443, 8443],
+                        allowed_ips: vec!["10.0.0.0/24".to_string()],
+                        rules: vec![L7Rule {
+                            allow: Some(openshell_core::proto::L7Allow {
+                                method: "GET".to_string(),
+                                path: "/v1/**".to_string(),
+                                ..Default::default()
+                            }),
+                        }],
+                        allow_encoded_slash: true,
+                        path: "/v1".to_string(),
+                        ..Default::default()
+                    }],
+                    binaries: vec![NetworkBinary {
+                        path: "/usr/bin/custom".to_string(),
+                        harness: true,
+                    }],
+                    inference_capable: false,
+                }),
+            })
+            .await
+            .unwrap();
+
+        let layers = profile_provider_policy_layers(&store, &["work-custom".to_string()])
+            .await
+            .unwrap();
+
+        assert_eq!(layers.len(), 1);
+        assert_eq!(layers[0].rule_name, "_provider_work_custom");
+        assert_eq!(layers[0].rule.endpoints[0].host, "api.custom.example");
+        assert_eq!(layers[0].rule.endpoints[0].ports, vec![443, 8443]);
+        assert_eq!(layers[0].rule.endpoints[0].rules.len(), 1);
+        assert_eq!(layers[0].rule.endpoints[0].allowed_ips, vec!["10.0.0.0/24"]);
+        assert!(layers[0].rule.endpoints[0].allow_encoded_slash);
+        assert_eq!(layers[0].rule.endpoints[0].path, "/v1");
+        assert!(layers[0].rule.binaries[0].harness);
+    }
+
+    #[tokio::test]
+    async fn provider_policy_layers_normalize_custom_provider_type_ids() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        store
+            .put_message(&test_provider("work-custom", " Custom-API "))
+            .await
+            .unwrap();
+        store
+            .put_message(&openshell_core::proto::StoredProviderProfile {
+                metadata: Some(openshell_core::proto::datamodel::v1::ObjectMeta {
+                    id: "profile-custom-api".to_string(),
+                    name: "custom-api".to_string(),
+                    created_at_ms: 1_000_000,
+                    labels: HashMap::new(),
+                }),
+                profile: Some(openshell_core::proto::ProviderProfile {
+                    id: "custom-api".to_string(),
+                    display_name: "Custom API".to_string(),
+                    description: String::new(),
+                    category: openshell_core::proto::ProviderProfileCategory::Other as i32,
+                    credentials: Vec::new(),
+                    endpoints: vec![NetworkEndpoint {
+                        host: "api.custom.example".to_string(),
+                        port: 443,
+                        ..Default::default()
+                    }],
+                    binaries: Vec::new(),
+                    inference_capable: false,
+                }),
+            })
+            .await
+            .unwrap();
+
+        let layers = profile_provider_policy_layers(&store, &["work-custom".to_string()])
+            .await
+            .unwrap();
+
+        assert_eq!(layers.len(), 1);
+        assert_eq!(layers[0].rule.endpoints[0].host, "api.custom.example");
     }
 
     #[tokio::test]
