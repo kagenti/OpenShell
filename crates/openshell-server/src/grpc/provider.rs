@@ -809,6 +809,7 @@ mod tests {
             TracingLogBus::new(),
             Arc::new(SupervisorSessionRegistry::new()),
             None,
+            None,
         ))
     }
 
