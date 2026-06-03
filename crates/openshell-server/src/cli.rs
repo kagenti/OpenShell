@@ -192,6 +192,11 @@ struct RunArgs {
         action = ArgAction::Set
     )]
     enable_loopback_service_http: bool,
+
+    /// Unix domain socket path for an external compute driver.
+    /// Required when --drivers=external.
+    #[arg(long, env = "OPENSHELL_COMPUTE_DRIVER_SOCKET")]
+    compute_driver_socket: Option<PathBuf>,
 }
 
 pub fn command() -> Command {
@@ -355,6 +360,10 @@ async fn run_from_args(mut args: RunArgs, matches: ArgMatches) -> Result<()> {
         .with_compute_drivers(args.drivers.clone())
         .with_server_sans(args.server_sans.clone())
         .with_loopback_service_http(args.enable_loopback_service_http);
+
+    if let Some(ref socket) = args.compute_driver_socket {
+        config = config.with_compute_driver_socket(socket.to_string_lossy());
+    }
 
     if let Some(ttl) = file
         .as_ref()

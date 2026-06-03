@@ -56,6 +56,7 @@ pub enum ComputeDriverKind {
     Vm,
     Docker,
     Podman,
+    External,
 }
 
 impl ComputeDriverKind {
@@ -66,6 +67,7 @@ impl ComputeDriverKind {
             Self::Vm => "vm",
             Self::Docker => "docker",
             Self::Podman => "podman",
+            Self::External => "external",
         }
     }
 }
@@ -85,8 +87,9 @@ impl FromStr for ComputeDriverKind {
             "vm" => Ok(Self::Vm),
             "docker" => Ok(Self::Docker),
             "podman" => Ok(Self::Podman),
+            "external" => Ok(Self::External),
             other => Err(format!(
-                "unsupported compute driver '{other}'. expected one of: kubernetes, vm, docker, podman"
+                "unsupported compute driver '{other}'. expected one of: kubernetes, vm, docker, podman, external"
             )),
         }
     }
@@ -366,6 +369,9 @@ pub struct Config {
 
     /// Browser-facing sandbox service routing configuration.
     pub service_routing: ServiceRoutingConfig,
+
+    /// Unix domain socket path for the external compute driver.
+    pub compute_driver_socket: String,
 }
 
 /// Browser-facing sandbox service routing configuration.
@@ -548,6 +554,7 @@ impl Config {
             compute_drivers: vec![],
             ssh_session_ttl_secs: default_ssh_session_ttl_secs(),
             service_routing: ServiceRoutingConfig::default(),
+            compute_driver_socket: String::new(),
         }
     }
 
@@ -641,6 +648,13 @@ impl Config {
     #[must_use]
     pub const fn with_loopback_service_http(mut self, enabled: bool) -> Self {
         self.service_routing.enable_loopback_service_http = enabled;
+        self
+    }
+
+    /// Set the Unix domain socket path for the external compute driver.
+    #[must_use]
+    pub fn with_compute_driver_socket(mut self, path: impl Into<String>) -> Self {
+        self.compute_driver_socket = path.into();
         self
     }
 }
@@ -756,6 +770,19 @@ mod tests {
             "docker".parse::<ComputeDriverKind>().unwrap(),
             ComputeDriverKind::Docker
         );
+        assert_eq!(
+            "external".parse::<ComputeDriverKind>().unwrap(),
+            ComputeDriverKind::External
+        );
+    }
+
+    #[test]
+    fn configured_compute_driver_accepts_external() {
+        let config = Config::new(None)
+            .with_compute_drivers([ComputeDriverKind::External])
+            .with_compute_driver_socket("/tmp/compute.sock");
+        assert_eq!(config.compute_drivers, vec![ComputeDriverKind::External]);
+        assert_eq!(config.compute_driver_socket, "/tmp/compute.sock");
     }
 
     #[test]
