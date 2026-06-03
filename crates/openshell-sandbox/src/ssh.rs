@@ -702,6 +702,16 @@ fn apply_child_env(
     for (key, value) in provider_env {
         cmd.env(key, value);
     }
+
+    for key in [
+        "ANTHROPIC_BASE_URL",
+        "OPENAI_BASE_URL",
+        "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+    ] {
+        if let Ok(val) = std::env::var(key) {
+            cmd.env(key, val);
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
