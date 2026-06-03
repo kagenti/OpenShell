@@ -7,6 +7,7 @@ on:
     branches:
     - main
     - mvp
+    - mvp-v2
   workflow_dispatch:
 
 # Deny all permissions at workflow level; each job declares only what it needs
@@ -70,7 +71,7 @@ jobs:
           tags: |
             type=ref,event=tag
             type=sha,prefix={{branch}}-,enable=${{ github.ref_type != 'tag' }}
-            type=raw,value=latest,enable=${{ (github.ref_type == 'tag' && startsWith(github.ref_name, 'v')) || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/mvp' }}
+            type=raw,value=latest,enable=${{ (github.ref_type == 'tag' && startsWith(github.ref_name, 'v')) || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/mvp' || github.ref == 'refs/heads/mvp-v2' }}
 
       - name: Wait before retry
         if: steps.meta.outcome == 'failure'
@@ -87,7 +88,7 @@ jobs:
           tags: |
             type=ref,event=tag
             type=sha,prefix={{branch}}-,enable=${{ github.ref_type != 'tag' }}
-            type=raw,value=latest,enable=${{ (github.ref_type == 'tag' && startsWith(github.ref_name, 'v')) || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/mvp' }}
+            type=raw,value=latest,enable=${{ (github.ref_type == 'tag' && startsWith(github.ref_name, 'v')) || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/mvp' || github.ref == 'refs/heads/mvp-v2' }}
 
       - name: Build and push gateway image
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7.1.0
@@ -156,7 +157,7 @@ jobs:
           tags: |
             type=ref,event=tag
             type=sha,prefix={{branch}}-,enable=${{ github.ref_type != 'tag' }}
-            type=raw,value=latest,enable=${{ (github.ref_type == 'tag' && startsWith(github.ref_name, 'v')) || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/mvp' }}
+            type=raw,value=latest,enable=${{ (github.ref_type == 'tag' && startsWith(github.ref_name, 'v')) || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/mvp' || github.ref == 'refs/heads/mvp-v2' }}
 
       - name: Wait before retry
         if: steps.meta.outcome == 'failure'
@@ -173,7 +174,7 @@ jobs:
           tags: |
             type=ref,event=tag
             type=sha,prefix={{branch}}-,enable=${{ github.ref_type != 'tag' }}
-            type=raw,value=latest,enable=${{ (github.ref_type == 'tag' && startsWith(github.ref_name, 'v')) || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/mvp' }}
+            type=raw,value=latest,enable=${{ (github.ref_type == 'tag' && startsWith(github.ref_name, 'v')) || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/mvp' || github.ref == 'refs/heads/mvp-v2' }}
 
       - name: Build and push supervisor image
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7.1.0

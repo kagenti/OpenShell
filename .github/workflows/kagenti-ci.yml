@@ -2,9 +2,9 @@ name: Kagenti CI
 
 on:
   pull_request:
-    branches: [main, mvp]
+    branches: [main, mvp, mvp-v2]
   push:
-    branches: [mvp]
+    branches: [mvp, mvp-v2]
 
 env:
   CARGO_TERM_COLOR: always
