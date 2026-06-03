@@ -169,6 +169,7 @@ impl JwksCache {
     /// initial key set.
     pub async fn new(config: &OidcConfig) -> Result<Self, String> {
         let http = Client::builder()
+            .tls_built_in_native_certs(true)
             .timeout(Duration::from_secs(10))
             .build()
             .map_err(|e| format!("failed to create HTTP client: {e}"))?;
