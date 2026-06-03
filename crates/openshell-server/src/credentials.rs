@@ -31,6 +31,12 @@ pub struct CredentialsDriverHandle {
     client: tokio::sync::Mutex<CredentialsDriverClient<Channel>>,
 }
 
+impl std::fmt::Debug for CredentialsDriverHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CredentialsDriverHandle").finish()
+    }
+}
+
 impl CredentialsDriverHandle {
     /// Connect to the credentials driver over a Unix domain socket.
     ///
