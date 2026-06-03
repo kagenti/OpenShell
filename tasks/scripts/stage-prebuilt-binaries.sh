@@ -166,11 +166,11 @@ build_component_for_arch() {
       echo "Error: cargo-zigbuild + zig are required to build ${binary} with the glibc 2.31 floor." >&2
       exit 1
     fi
-  elif [[ "$current_host_os" != "Linux" || "$current_host_arch" != "$arch" ]]; then
+  elif [[ "$current_host_os" != "Linux" || "$current_host_arch" != "$arch" || "$target_libc" == "musl" ]]; then
     if command -v cargo-zigbuild >/dev/null 2>&1 || mise which cargo-zigbuild >/dev/null 2>&1; then
       cargo_subcommand=(cargo zigbuild)
     else
-      echo "Error: cannot build ${binary} for linux/${arch} on ${current_host_os}/${current_host_arch}." >&2
+      echo "Error: cannot build ${binary} for linux/${arch} on ${current_host_os}/${current_host_arch} (libc=${target_libc})." >&2
       echo "Install cargo-zigbuild + zig, build on a matching Linux host, or provide prebuilt binaries in:" >&2
       echo "  deploy/docker/.build/prebuilt-binaries/${arch}/" >&2
       exit 1
