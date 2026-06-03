@@ -10,7 +10,6 @@ use openshell_core::proto::credentials::v1::{
 use openshell_core::{Error, Result};
 use std::sync::Arc;
 use tonic::transport::Channel;
-use tracing::debug;
 
 #[cfg(unix)]
 use hyper_util::rt::TokioIo;
@@ -24,6 +23,8 @@ use tokio::net::UnixStream;
 use tonic::transport::Endpoint;
 #[cfg(unix)]
 use tower::service_fn;
+#[cfg(unix)]
+use tracing::debug;
 
 pub type SharedCredentialsDriver = Option<Arc<CredentialsDriverHandle>>;
 
