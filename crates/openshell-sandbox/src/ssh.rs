@@ -55,17 +55,11 @@ fn ssh_server_init(
     let config = Arc::new(config);
     let ca_paths = ca_file_paths.as_ref().map(|p| Arc::new(p.clone()));
 
-    // Ensure the parent directory exists and is root-owned with 0700
-    // permissions. The sandbox entrypoint runs as an unprivileged user; it
-    // must not be able to enter this directory and connect to the socket.
+    // Ensure the parent directory exists. The socket file itself is set to
+    // 0600 below which is the security boundary — we do NOT chmod the parent
+    // because when the socket lives in /tmp this would break other processes.
     if let Some(parent) = listen_path.parent() {
         std::fs::create_dir_all(parent).into_diagnostic()?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o700);
-            std::fs::set_permissions(parent, perms).into_diagnostic()?;
-        }
     }
 
     // Remove any stale socket from a previous run before binding.
