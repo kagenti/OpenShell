@@ -286,6 +286,7 @@ fn inheritable_keys(driver: ComputeDriverKind) -> &'static [&'static str] {
             "guest_tls_cert",
             "guest_tls_key",
         ],
+        ComputeDriverKind::External => &[],
     }
 }
 
