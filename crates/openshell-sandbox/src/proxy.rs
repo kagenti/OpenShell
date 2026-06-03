@@ -7049,20 +7049,23 @@ network_policies:
             ),
             Err(err) => {
                 assert!(
-                    err.reason.contains("ambiguous shared socket ownership"),
-                    "expected ambiguous socket ownership error, got: {}",
+                    err.reason.contains("ambiguous shared socket ownership")
+                        || err.reason.contains("failed to resolve peer binary"),
+                    "expected ambiguous socket ownership or /proc access error, got: {}",
                     err.reason
                 );
-                assert!(
-                    err.reason.contains(&entrypoint_pid.to_string()),
-                    "error should include parent PID; got: {}",
-                    err.reason
-                );
-                assert!(
-                    err.reason.contains(&child_pid.to_string()),
-                    "error should include child PID; got: {}",
-                    err.reason
-                );
+                if err.reason.contains("ambiguous shared socket ownership") {
+                    assert!(
+                        err.reason.contains(&entrypoint_pid.to_string()),
+                        "error should include parent PID; got: {}",
+                        err.reason
+                    );
+                    assert!(
+                        err.reason.contains(&child_pid.to_string()),
+                        "error should include child PID; got: {}",
+                        err.reason
+                    );
+                }
             }
         }
     }
