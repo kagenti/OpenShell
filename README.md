@@ -1,4 +1,13 @@
-# NVIDIA OpenShell
+# OpenShell (Kagenti Fork)
+
+> **This is a [Kagenti](https://github.com/kagenti) fork of [NVIDIA/OpenShell](https://github.com/NVIDIA/OpenShell).**
+>
+> The `mvp-v2` branch contains Kagenti-specific changes for multi-tenant
+> gateway deployment with OIDC authentication (Keycloak), per-tenant compute
+> isolation via external compute drivers, and credential driver sidecar support.
+>
+> We sync regularly with upstream `main`. See the
+> [kagenti epic](https://github.com/kagenti/kagenti/issues/1363) for the full plan.
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue)](https://github.com/NVIDIA/OpenShell/blob/main/LICENSE)
 [![PyPI](https://img.shields.io/badge/PyPI-openshell-orange?logo=pypi)](https://pypi.org/project/openshell/)
