@@ -24,6 +24,7 @@ pub mod certgen;
 pub mod cli;
 mod compute;
 pub mod config_file;
+mod credentials;
 mod defaults;
 mod grpc;
 mod http;
@@ -61,6 +62,7 @@ use tracing::{debug, error, info, warn};
 pub(crate) static TEST_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 use compute::{ComputeRuntime, DockerComputeConfig, VmComputeConfig};
+pub use credentials::SharedCredentialsDriver;
 pub use grpc::OpenShellService;
 pub use http::{health_router, http_router, metrics_router, service_http_router};
 pub use multiplex::{MultiplexService, MultiplexedService};
@@ -132,6 +134,9 @@ pub struct ServerState {
     /// `IssueSandboxToken` bootstrap path. Only present when the gateway
     /// runs in-cluster.
     pub k8s_sa_authenticator: Option<Arc<auth::k8s_sa::K8sServiceAccountAuthenticator>>,
+
+    /// Out-of-process credentials driver (resolves named credentials to tokens).
+    pub credentials_driver: SharedCredentialsDriver,
 }
 
 fn is_benign_tls_handshake_failure(error: &std::io::Error) -> bool {
@@ -163,6 +168,7 @@ impl ServerState {
         tracing_log_bus: TracingLogBus,
         supervisor_sessions: Arc<supervisor_session::SupervisorSessionRegistry>,
         oidc_cache: Option<Arc<auth::oidc::JwksCache>>,
+        credentials_driver: SharedCredentialsDriver,
     ) -> Self {
         Self {
             config,
@@ -180,6 +186,7 @@ impl ServerState {
             sandbox_jwt_issuer: None,
             sandbox_jwt_authenticator: None,
             k8s_sa_authenticator: None,
+            credentials_driver,
         }
     }
 }
@@ -238,6 +245,17 @@ pub async fn run_server(
         supervisor_sessions.clone(),
     )
     .await?;
+
+    let credentials_driver = if config.credentials_driver_socket.is_empty() {
+        None
+    } else {
+        let handle = credentials::CredentialsDriverHandle::connect(Path::new(
+            &config.credentials_driver_socket,
+        ))
+        .await?;
+        Some(Arc::new(handle))
+    };
+
     let mut state = ServerState::new(
         config.clone(),
         store.clone(),
@@ -247,6 +265,7 @@ pub async fn run_server(
         tracing_log_bus,
         supervisor_sessions,
         oidc_cache,
+        credentials_driver,
     );
 
     // Load the gateway-minted sandbox JWT signing key when configured.
@@ -1008,6 +1027,7 @@ mod tests {
             crate::sandbox_watch::SandboxWatchBus::new(),
             crate::tracing_bus::TracingLogBus::new(),
             Arc::new(crate::supervisor_session::SupervisorSessionRegistry::new()),
+            None,
             None,
         ))
     }

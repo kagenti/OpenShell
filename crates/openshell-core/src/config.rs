@@ -372,6 +372,9 @@ pub struct Config {
 
     /// Unix domain socket path for the external compute driver.
     pub compute_driver_socket: String,
+
+    /// Unix domain socket path for the credentials driver sidecar.
+    pub credentials_driver_socket: String,
 }
 
 /// Browser-facing sandbox service routing configuration.
@@ -555,6 +558,7 @@ impl Config {
             ssh_session_ttl_secs: default_ssh_session_ttl_secs(),
             service_routing: ServiceRoutingConfig::default(),
             compute_driver_socket: String::new(),
+            credentials_driver_socket: String::new(),
         }
     }
 
@@ -655,6 +659,13 @@ impl Config {
     #[must_use]
     pub fn with_compute_driver_socket(mut self, path: impl Into<String>) -> Self {
         self.compute_driver_socket = path.into();
+        self
+    }
+
+    /// Set the Unix domain socket path for the credentials driver sidecar.
+    #[must_use]
+    pub fn with_credentials_driver_socket(mut self, path: impl Into<String>) -> Self {
+        self.credentials_driver_socket = path.into();
         self
     }
 }

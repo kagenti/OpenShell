@@ -697,6 +697,7 @@ pub mod test_support {
             TracingLogBus::new(),
             Arc::new(SupervisorSessionRegistry::new()),
             None,
+            None,
         ))
     }
 }

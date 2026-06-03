@@ -197,6 +197,11 @@ struct RunArgs {
     /// Required when --drivers=external.
     #[arg(long, env = "OPENSHELL_COMPUTE_DRIVER_SOCKET")]
     compute_driver_socket: Option<PathBuf>,
+
+    /// Unix domain socket path for a credentials driver sidecar.
+    /// When set, the gateway delegates credential resolution to this driver.
+    #[arg(long, env = "OPENSHELL_CREDENTIALS_DRIVER_SOCKET")]
+    credentials_driver_socket: Option<PathBuf>,
 }
 
 pub fn command() -> Command {
@@ -363,6 +368,9 @@ async fn run_from_args(mut args: RunArgs, matches: ArgMatches) -> Result<()> {
 
     if let Some(ref socket) = args.compute_driver_socket {
         config = config.with_compute_driver_socket(socket.to_string_lossy());
+    }
+    if let Some(ref socket) = args.credentials_driver_socket {
+        config = config.with_credentials_driver_socket(socket.to_string_lossy());
     }
 
     if let Some(ttl) = file
