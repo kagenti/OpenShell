@@ -1405,8 +1405,12 @@ fn evaluate_opa_tcp(
             // Fall through to OPA with an unresolved identity — policies without
             // binary restrictions (empty binaries list) will still allow.
             warn!(
-                "identity resolution failed (port={peer_port}): {}; using unresolved identity",
-                err.reason
+                port = peer_port,
+                reason = %err.reason,
+                binary = ?err.binary,
+                binary_pid = ?err.binary_pid,
+                ancestors = ?err.ancestors,
+                "identity resolution failed; using unresolved identity",
             );
             ResolvedIdentity {
                 bin_path: PathBuf::from("<unresolved>"),
