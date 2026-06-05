@@ -5165,4 +5165,61 @@ network_policies:
         let input = l7_input("h.test", 80, "HEAD", "/protected");
         assert!(!eval_l7(&engine, &input));
     }
+
+    #[test]
+    fn empty_binaries_allows_any_binary() {
+        let engine = test_engine();
+        let input = NetworkInput {
+            host: "open.example.com".into(),
+            port: 443,
+            binary_path: PathBuf::from("/any/random/binary"),
+            binary_sha256: "unused".into(),
+            ancestors: vec![],
+            cmdline_paths: vec![],
+        };
+        let decision = engine.evaluate_network(&input).unwrap();
+        assert!(
+            decision.allowed,
+            "Expected allow with empty binaries list, got deny: {}",
+            decision.reason
+        );
+        assert_eq!(decision.matched_policy.as_deref(), Some("open_endpoint"));
+    }
+
+    #[test]
+    fn unresolved_identity_allowed_with_empty_binaries() {
+        let engine = test_engine();
+        let input = NetworkInput {
+            host: "open.example.com".into(),
+            port: 443,
+            binary_path: PathBuf::from("<unresolved>"),
+            binary_sha256: String::new(),
+            ancestors: vec![],
+            cmdline_paths: vec![],
+        };
+        let decision = engine.evaluate_network(&input).unwrap();
+        assert!(
+            decision.allowed,
+            "Expected allow for unresolved identity with empty binaries, got deny: {}",
+            decision.reason
+        );
+    }
+
+    #[test]
+    fn unresolved_identity_denied_with_specific_binaries() {
+        let engine = test_engine();
+        let input = NetworkInput {
+            host: "api.anthropic.com".into(),
+            port: 443,
+            binary_path: PathBuf::from("<unresolved>"),
+            binary_sha256: String::new(),
+            ancestors: vec![],
+            cmdline_paths: vec![],
+        };
+        let decision = engine.evaluate_network(&input).unwrap();
+        assert!(
+            !decision.allowed,
+            "Expected deny for unresolved identity when policy requires specific binary"
+        );
+    }
 }

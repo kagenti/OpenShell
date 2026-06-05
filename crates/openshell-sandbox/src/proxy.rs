@@ -1400,13 +1400,25 @@ fn evaluate_opa_tcp(
     let identity = match resolve_process_identity(pid, peer_port, identity_cache) {
         Ok(id) => id,
         Err(err) => {
-            return deny(
-                err.reason,
-                err.binary,
-                err.binary_pid,
-                err.ancestors,
-                vec![],
+            // In container/K8s deployments, network namespace setup can cause
+            // ephemeral port mismatches between peer_addr and /proc/net/tcp.
+            // Fall through to OPA with an unresolved identity — policies without
+            // binary restrictions (empty binaries list) will still allow.
+            warn!(
+                port = peer_port,
+                reason = %err.reason,
+                binary = ?err.binary,
+                binary_pid = ?err.binary_pid,
+                ancestors = ?err.ancestors,
+                "identity resolution failed; using unresolved identity",
             );
+            ResolvedIdentity {
+                bin_path: PathBuf::from("<unresolved>"),
+                binary_pid: 0,
+                ancestors: vec![],
+                cmdline_paths: vec![],
+                bin_hash: String::new(),
+            }
         }
     };
 

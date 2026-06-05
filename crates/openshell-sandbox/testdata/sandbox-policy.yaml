@@ -82,3 +82,8 @@ network_policies:
       - { host: gitlab.com, port: 443 }
     binaries:
       - { path: /usr/bin/glab }
+
+  open_endpoint:
+    name: open_endpoint
+    endpoints:
+      - { host: open.example.com, port: 443 }
