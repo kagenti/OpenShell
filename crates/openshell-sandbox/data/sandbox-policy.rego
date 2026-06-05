@@ -161,6 +161,13 @@ binary_allowed(policy, exec) if {
 	glob.match(b.path, ["/"], p)
 }
 
+# Binary matching: empty binaries list means no binary restriction.
+# When a policy declares endpoints without specifying which binaries may
+# access them, any binary is permitted (the endpoint itself is the gate).
+binary_allowed(policy, _) if {
+	count(object.get(policy, "binaries", [])) == 0
+}
+
 user_declared_binary_allowed(policy, exec) if {
 	some b
 	b := policy.binaries[_]
@@ -185,6 +192,10 @@ user_declared_binary_allowed(policy, exec) if {
 	all_paths := array.concat([exec.path], exec.ancestors)
 	some p in all_paths
 	glob.match(b.path, ["/"], p)
+}
+
+user_declared_binary_allowed(policy, _) if {
+	count(object.get(policy, "binaries", [])) == 0
 }
 
 # --- Network action (allow / deny) ---
