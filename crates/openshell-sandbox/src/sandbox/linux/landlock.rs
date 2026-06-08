@@ -176,7 +176,7 @@ pub fn prepare(policy: &SandboxPolicy, workdir: Option<&str>) -> Result<Option<P
 
     let result: Result<PreparedRuleset> = (|| {
         let access_all = AccessFs::from_all(abi);
-        let access_read = AccessFs::from_read(abi);
+        let access_read = AccessFs::from_read(abi) | AccessFs::Execute;
 
         let mut ruleset = Ruleset::default();
         ruleset = ruleset
@@ -189,7 +189,7 @@ pub fn prepare(policy: &SandboxPolicy, workdir: Option<&str>) -> Result<Option<P
 
         for path in &read_only {
             if let Some(path_fd) = try_open_path(path, compatibility)? {
-                debug!(path = %path.display(), "Landlock allow read-only");
+                debug!(path = %path.display(), "Landlock allow read-only+execute");
                 ruleset = ruleset
                     .add_rule(PathBeneath::new(path_fd, access_read))
                     .into_diagnostic()?;

@@ -320,7 +320,14 @@ impl ProcessHandle {
         }
 
         let child = cmd.spawn().into_diagnostic()?;
-        let pid = child.id().unwrap_or(0);
+        let pid = child.id().ok_or_else(|| {
+            miette::miette!(
+                "Entrypoint process exited immediately after spawn (exec failed). \
+                 This typically means Landlock denied execute access to the entrypoint binary. \
+                 Check that the sandbox policy grants execute permission on the entrypoint path. \
+                 [program={program}]"
+            )
+        })?;
         register_managed_child(pid);
 
         debug!(pid, program, "Process spawned");
@@ -416,7 +423,13 @@ impl ProcessHandle {
         }
 
         let child = cmd.spawn().into_diagnostic()?;
-        let pid = child.id().unwrap_or(0);
+        let pid = child.id().ok_or_else(|| {
+            miette::miette!(
+                "Entrypoint process exited immediately after spawn (exec failed). \
+                 This typically means the sandbox denied execute access to the entrypoint binary. \
+                 [program={program}]"
+            )
+        })?;
         #[cfg(target_os = "linux")]
         register_managed_child(pid);
 
