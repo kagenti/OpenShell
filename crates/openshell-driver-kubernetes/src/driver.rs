@@ -1176,6 +1176,15 @@ fn sandbox_template_to_k8s(
             serde_json::Value::String(params.sandbox_id.to_string()),
         );
     }
+    // Bypass Istio ambient inbound capture for sandbox pods. Without this,
+    // ztunnel (HBONE mode on OpenShift) re-originates veth-pair connections from
+    // the pod's main IP, breaking the proxy's /proc/net/tcp identity resolution
+    // which relies on seeing the sandbox's 10.200.0.2 source address.
+    // This annotation is a no-op when Istio ambient is not active.
+    pod_annotations.insert(
+        "ambient.istio.io/bypass-inbound-capture".to_string(),
+        serde_json::Value::String("true".to_string()),
+    );
     if !pod_annotations.is_empty() {
         metadata.insert(
             "annotations".to_string(),
