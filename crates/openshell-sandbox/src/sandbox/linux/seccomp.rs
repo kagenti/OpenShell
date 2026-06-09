@@ -70,7 +70,10 @@ pub fn apply_supervisor_prelude() -> Result<()> {
 }
 
 pub fn apply(policy: &SandboxPolicy) -> Result<()> {
-    let allow_inet = matches!(policy.network.mode, NetworkMode::Proxy | NetworkMode::Allow);
+    let allow_inet = matches!(
+        policy.network.mode,
+        NetworkMode::Proxy | NetworkMode::Allow | NetworkMode::Platform
+    );
     let main_filter = build_filter(allow_inet)?;
     let clone3_filter = build_clone3_filter()?;
 
