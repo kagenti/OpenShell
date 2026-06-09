@@ -1821,4 +1821,24 @@ network_policies:
             "port >65535 should fail to parse"
         );
     }
+
+    #[test]
+    fn platform_mode_round_trip() {
+        let mut policy = restrictive_default_policy();
+        policy.network_enforcement = 1; // PLATFORM
+        let yaml = serialize_sandbox_policy(&policy).unwrap();
+        let parsed = parse_sandbox_policy(&yaml).unwrap();
+        assert_eq!(parsed.network_enforcement, 1);
+    }
+
+    #[test]
+    fn platform_mode_passes_validation() {
+        let mut policy = restrictive_default_policy();
+        policy.network_enforcement = 1; // PLATFORM
+        let result = validate_sandbox_policy(&policy);
+        assert!(
+            result.is_ok(),
+            "Platform mode should pass validation: {result:?}"
+        );
+    }
 }
