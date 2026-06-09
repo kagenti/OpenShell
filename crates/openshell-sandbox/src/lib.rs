@@ -487,7 +487,10 @@ pub async fn run_sandbox(
 
     // Generate ephemeral CA and TLS state for HTTPS L7 inspection.
     // The CA cert is written to disk so sandbox processes can trust it.
-    let (tls_state, ca_file_paths) = if matches!(policy.network.mode, NetworkMode::Proxy) {
+    let (tls_state, ca_file_paths) = if matches!(
+        policy.network.mode,
+        NetworkMode::Proxy | NetworkMode::Platform
+    ) {
         match SandboxCa::generate() {
             Ok(ca) => {
                 let tls_dir = std::path::Path::new("/etc/openshell-tls");
@@ -601,7 +604,10 @@ pub async fn run_sandbox(
     let entrypoint_pid = Arc::new(AtomicU32::new(0));
 
     let (_proxy, denial_rx, bypass_denial_tx, activity_rx, bypass_activity_tx) =
-        if matches!(policy.network.mode, NetworkMode::Proxy) {
+        if matches!(
+            policy.network.mode,
+            NetworkMode::Proxy | NetworkMode::Platform
+        ) {
             let proxy_policy = policy.network.proxy.as_ref().ok_or_else(|| {
                 miette::miette!(
                     "Network mode is set to proxy but no proxy configuration was provided"
@@ -624,6 +630,20 @@ pub async fn run_sandbox(
             let bind_addr = netns.as_ref().map(|ns| {
                 let port = proxy_policy.http_addr.map_or(3128, |addr| addr.port());
                 SocketAddr::new(ns.host_ip(), port)
+            });
+
+            // Platform mode: no netns, bind proxy to loopback.
+            #[cfg(target_os = "linux")]
+            let bind_addr = bind_addr.or_else(|| {
+                if matches!(policy.network.mode, NetworkMode::Platform) {
+                    let port = proxy_policy.http_addr.map_or(3128, |addr| addr.port());
+                    Some(SocketAddr::new(
+                        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                        port,
+                    ))
+                } else {
+                    None
+                }
             });
 
             #[cfg(not(target_os = "linux"))]
@@ -705,18 +725,30 @@ pub async fn run_sandbox(
     #[cfg(not(target_os = "linux"))]
     let ssh_netns_fd: Option<i32> = None;
 
-    let ssh_proxy_url = if matches!(policy.network.mode, NetworkMode::Proxy) {
+    let ssh_proxy_url = if matches!(
+        policy.network.mode,
+        NetworkMode::Proxy | NetworkMode::Platform
+    ) {
         #[cfg(target_os = "linux")]
         {
-            netns.as_ref().map(|ns| {
+            if let Some(ns) = netns.as_ref() {
                 let port = policy
                     .network
                     .proxy
                     .as_ref()
                     .and_then(|p| p.http_addr)
                     .map_or(3128, |addr| addr.port());
-                format!("http://{}:{port}", ns.host_ip())
-            })
+                Some(format!("http://{}:{port}", ns.host_ip()))
+            } else {
+                // Platform mode: proxy on loopback
+                let port = policy
+                    .network
+                    .proxy
+                    .as_ref()
+                    .and_then(|p| p.http_addr)
+                    .map_or(3128, |addr| addr.port());
+                Some(format!("http://127.0.0.1:{port}"))
+            }
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -1730,7 +1762,10 @@ where
 
 fn enrich_sandbox_baseline_paths(policy: &mut SandboxPolicy) {
     let (ro, rw) =
-        active_baseline_enrichment_paths(matches!(policy.network.mode, NetworkMode::Proxy));
+        active_baseline_enrichment_paths(matches!(
+            policy.network.mode,
+            NetworkMode::Proxy | NetworkMode::Platform
+        ));
     let modified = enrich_sandbox_baseline_paths_with(policy, &ro, &rw, std::path::Path::exists);
 
     if modified {
