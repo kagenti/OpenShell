@@ -4,9 +4,10 @@
 //! Landlock filesystem sandboxing.
 
 use crate::policy::{LandlockCompatibility, SandboxPolicy};
+use crate::policy::NetworkMode;
 use landlock::{
-    ABI, Access, AccessFs, CompatLevel, Compatible, PathBeneath, PathFd, PathFdError, Ruleset,
-    RulesetAttr, RulesetCreatedAttr,
+    ABI, Access, AccessFs, AccessNet, CompatLevel, Compatible, NetPort, PathBeneath, PathFd,
+    PathFdError, Ruleset, RulesetAttr, RulesetCreatedAttr,
 };
 use miette::{IntoDiagnostic, Result};
 use std::path::{Path, PathBuf};
@@ -184,6 +185,15 @@ pub fn prepare(policy: &SandboxPolicy, workdir: Option<&str>) -> Result<Option<P
             .handle_access(access_all)
             .into_diagnostic()?;
 
+        // Platform mode: also handle TCP connect access so Landlock can
+        // restrict which ports the agent connects to. This requires ABI v4.
+        // The compat_level handles graceful degradation on older kernels.
+        if matches!(policy.network.mode, NetworkMode::Platform) {
+            ruleset = ruleset
+                .handle_access(AccessNet::ConnectTcp)
+                .into_diagnostic()?;
+        }
+
         let mut ruleset = ruleset.create().into_diagnostic()?;
         let mut rules_applied: usize = 0;
 
@@ -204,6 +214,37 @@ pub fn prepare(policy: &SandboxPolicy, workdir: Option<&str>) -> Result<Option<P
                     .add_rule(PathBeneath::new(path_fd, access_all))
                     .into_diagnostic()?;
                 rules_applied += 1;
+            }
+        }
+
+        // Platform mode: restrict TCP connect to the proxy port only.
+        // Uses Landlock ABI v4 (LANDLOCK_ACCESS_NET_CONNECT_TCP). If the
+        // kernel doesn't support ABI v4, the network rules are silently
+        // skipped (best_effort) and enforcement falls back to NetworkPolicy.
+        if matches!(policy.network.mode, NetworkMode::Platform) {
+            let proxy_port = policy
+                .network
+                .proxy
+                .as_ref()
+                .and_then(|p| p.http_addr)
+                .map_or(3128_u16, |addr| addr.port());
+
+            match ruleset.add_rule(NetPort::new(proxy_port, AccessNet::ConnectTcp)) {
+                Ok(r) => {
+                    ruleset = r;
+                    debug!(
+                        port = proxy_port,
+                        "Landlock allow TCP connect (proxy port only)"
+                    );
+                    rules_applied += 1;
+                }
+                Err(e) => {
+                    debug!(
+                        error = %e,
+                        "Landlock TCP port restriction unavailable (ABI v4 required), \
+                         falling back to cooperative proxy enforcement"
+                    );
+                }
             }
         }
 
