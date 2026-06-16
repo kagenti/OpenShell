@@ -25,6 +25,7 @@ pub(super) async fn handle_expose_service(
     state: &Arc<ServerState>,
     request: Request<ExposeServiceRequest>,
 ) -> Result<Response<ServiceEndpointResponse>, Status> {
+    let principal = request.extensions().get::<crate::auth::principal::Principal>().cloned();
     let req = request.into_inner();
     validate_endpoint_name("sandbox", &req.sandbox, MAX_SANDBOX_NAME_LEN)?;
     validate_optional_endpoint_name("service", &req.service, MAX_SERVICE_NAME_LEN)?;
@@ -38,6 +39,7 @@ pub(super) async fn handle_expose_service(
         .await
         .map_err(|e| Status::internal(format!("fetch sandbox failed: {e}")))?
         .ok_or_else(|| Status::not_found("sandbox not found"))?;
+    crate::grpc::sandbox::check_sandbox_owner(&sandbox, principal.as_ref(), state)?;
 
     let now = crate::persistence::current_time_ms();
     let key = service_routing::endpoint_key(&req.sandbox, &req.service);
@@ -128,9 +130,19 @@ pub(super) async fn handle_get_service(
     state: &Arc<ServerState>,
     request: Request<GetServiceRequest>,
 ) -> Result<Response<ServiceEndpointResponse>, Status> {
+    let principal = request.extensions().get::<crate::auth::principal::Principal>().cloned();
     let req = request.into_inner();
     validate_endpoint_name("sandbox", &req.sandbox, MAX_SANDBOX_NAME_LEN)?;
     validate_optional_endpoint_name("service", &req.service, MAX_SERVICE_NAME_LEN)?;
+
+    // Ownership check: verify caller owns the referenced sandbox.
+    let sandbox = state
+        .store
+        .get_message_by_name::<Sandbox>(&req.sandbox)
+        .await
+        .map_err(|e| Status::internal(format!("fetch sandbox failed: {e}")))?
+        .ok_or_else(|| Status::not_found("sandbox not found"))?;
+    crate::grpc::sandbox::check_sandbox_owner(&sandbox, principal.as_ref(), state)?;
 
     let endpoint = get_service_endpoint(state, &req.sandbox, &req.service)
         .await?
@@ -171,9 +183,19 @@ pub(super) async fn handle_delete_service(
     state: &Arc<ServerState>,
     request: Request<DeleteServiceRequest>,
 ) -> Result<Response<DeleteServiceResponse>, Status> {
+    let principal = request.extensions().get::<crate::auth::principal::Principal>().cloned();
     let req = request.into_inner();
     validate_endpoint_name("sandbox", &req.sandbox, MAX_SANDBOX_NAME_LEN)?;
     validate_optional_endpoint_name("service", &req.service, MAX_SERVICE_NAME_LEN)?;
+
+    // Ownership check: verify caller owns the referenced sandbox.
+    let sandbox = state
+        .store
+        .get_message_by_name::<Sandbox>(&req.sandbox)
+        .await
+        .map_err(|e| Status::internal(format!("fetch sandbox failed: {e}")))?
+        .ok_or_else(|| Status::not_found("sandbox not found"))?;
+    crate::grpc::sandbox::check_sandbox_owner(&sandbox, principal.as_ref(), state)?;
 
     let endpoint = get_service_endpoint(state, &req.sandbox, &req.service).await?;
     let Some(endpoint) = endpoint else {

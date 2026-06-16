@@ -55,6 +55,31 @@ use crate::persistence::current_time_ms;
 const TCP_FORWARD_CHUNK_SIZE: usize = 64 * 1024;
 
 // ---------------------------------------------------------------------------
+// Ownership helpers
+// ---------------------------------------------------------------------------
+
+/// Get the configured admin role name (empty string when OIDC is not configured).
+fn admin_role_name(state: &ServerState) -> &str {
+    state
+        .config
+        .oidc
+        .as_ref()
+        .map_or("", |oidc| &oidc.admin_role)
+}
+
+/// Verify the caller owns the sandbox. Extracts labels from sandbox metadata and
+/// delegates to the ownership module.
+pub(super) fn check_sandbox_owner(
+    sandbox: &Sandbox,
+    principal: Option<&crate::auth::principal::Principal>,
+    state: &ServerState,
+) -> Result<(), Status> {
+    let empty = std::collections::HashMap::new();
+    let labels = sandbox.metadata.as_ref().map_or(&empty, |m| &m.labels);
+    crate::auth::ownership::check_owner(labels, principal, admin_role_name(state))
+}
+
+// ---------------------------------------------------------------------------
 // Sandbox lifecycle handlers
 // ---------------------------------------------------------------------------
 
@@ -118,13 +143,21 @@ async fn handle_create_sandbox_inner(
     state: &Arc<ServerState>,
     request: Request<CreateSandboxRequest>,
 ) -> Result<Response<SandboxResponse>, Status> {
-    let request = request.into_inner();
+    let principal = request.extensions().get::<crate::auth::principal::Principal>().cloned();
+    let mut request = request.into_inner();
     let spec = request
         .spec
         .ok_or_else(|| Status::invalid_argument("spec is required"))?;
 
     // Validate field sizes before any I/O (fail fast on oversized payloads).
     validate_sandbox_spec(&request.name, &spec)?;
+
+    // Stamp ownership: strip reserved keys and set owner from verified identity.
+    // When OIDC is not configured (principal is None), skip ownership stamping
+    // to maintain backward compatibility with single-user local dev.
+    if principal.is_some() {
+        crate::auth::ownership::stamp_owner(&mut request.labels, principal.as_ref())?;
+    }
 
     // Validate labels (keys and values must meet Kubernetes requirements).
     for (key, value) in &request.labels {
@@ -227,6 +260,7 @@ pub(super) async fn handle_get_sandbox(
     state: &Arc<ServerState>,
     request: Request<GetSandboxRequest>,
 ) -> Result<Response<SandboxResponse>, Status> {
+    let principal = request.extensions().get::<crate::auth::principal::Principal>().cloned();
     let name = request.into_inner().name;
     if name.is_empty() {
         return Err(Status::invalid_argument("name is required"));
@@ -239,6 +273,7 @@ pub(super) async fn handle_get_sandbox(
         .map_err(|e| Status::internal(format!("fetch sandbox failed: {e}")))?;
 
     let sandbox = sandbox.ok_or_else(|| Status::not_found("sandbox not found"))?;
+    check_sandbox_owner(&sandbox, principal.as_ref(), state)?;
     Ok(Response::new(SandboxResponse {
         sandbox: Some(sandbox),
     }))
@@ -248,20 +283,29 @@ pub(super) async fn handle_list_sandboxes(
     state: &Arc<ServerState>,
     request: Request<ListSandboxesRequest>,
 ) -> Result<Response<ListSandboxesResponse>, Status> {
+    let principal = request.extensions().get::<crate::auth::principal::Principal>().cloned();
     let request = request.into_inner();
     let limit = clamp_limit(request.limit, 100, MAX_PAGE_SIZE);
 
-    let sandboxes: Vec<Sandbox> = if request.label_selector.is_empty() {
+    // Inject owner filter so users only see their own sandboxes.
+    let admin_role = admin_role_name(state);
+    let effective_selector = crate::auth::ownership::owner_selector(
+        principal.as_ref(),
+        &request.label_selector,
+        admin_role,
+    )?;
+
+    let sandboxes: Vec<Sandbox> = if effective_selector.is_empty() {
         state
             .store
             .list_messages(limit, request.offset)
             .await
             .map_err(|e| Status::internal(format!("list sandboxes failed: {e}")))?
     } else {
-        crate::grpc::validation::validate_label_selector(&request.label_selector)?;
+        crate::grpc::validation::validate_label_selector(&effective_selector)?;
         state
             .store
-            .list_messages_with_selector(&request.label_selector, limit, request.offset)
+            .list_messages_with_selector(&effective_selector, limit, request.offset)
             .await
             .map_err(|e| Status::internal(format!("list sandboxes with selector failed: {e}")))?
     };
@@ -273,7 +317,9 @@ pub(super) async fn handle_list_sandbox_providers(
     state: &Arc<ServerState>,
     request: Request<ListSandboxProvidersRequest>,
 ) -> Result<Response<ListSandboxProvidersResponse>, Status> {
+    let principal = request.extensions().get::<crate::auth::principal::Principal>().cloned();
     let sandbox = sandbox_by_name(state, &request.into_inner().sandbox_name).await?;
+    check_sandbox_owner(&sandbox, principal.as_ref(), state)?;
     let providers = providers_for_sandbox(state, &sandbox).await?;
     Ok(Response::new(ListSandboxProvidersResponse { providers }))
 }
@@ -282,6 +328,7 @@ pub(super) async fn handle_attach_sandbox_provider(
     state: &Arc<ServerState>,
     request: Request<AttachSandboxProviderRequest>,
 ) -> Result<Response<AttachSandboxProviderResponse>, Status> {
+    let principal = request.extensions().get::<crate::auth::principal::Principal>().cloned();
     let request = request.into_inner();
     if request.provider_name.is_empty() {
         return Err(Status::invalid_argument("provider_name is required"));
@@ -312,6 +359,7 @@ pub(super) async fn handle_attach_sandbox_provider(
 
     let _sandbox_sync_guard = state.compute.sandbox_sync_guard().await;
     let sandbox = sandbox_by_name(state, &request.sandbox_name).await?;
+    check_sandbox_owner(&sandbox, principal.as_ref(), state)?;
     let sandbox_id = sandbox
         .metadata
         .as_ref()
@@ -396,6 +444,7 @@ pub(super) async fn handle_detach_sandbox_provider(
     state: &Arc<ServerState>,
     request: Request<DetachSandboxProviderRequest>,
 ) -> Result<Response<DetachSandboxProviderResponse>, Status> {
+    let principal = request.extensions().get::<crate::auth::principal::Principal>().cloned();
     let request = request.into_inner();
     if request.provider_name.is_empty() {
         return Err(Status::invalid_argument("provider_name is required"));
@@ -412,6 +461,7 @@ pub(super) async fn handle_detach_sandbox_provider(
 
     let _sandbox_sync_guard = state.compute.sandbox_sync_guard().await;
     let sandbox = sandbox_by_name(state, &request.sandbox_name).await?;
+    check_sandbox_owner(&sandbox, principal.as_ref(), state)?;
     let sandbox_id = sandbox
         .metadata
         .as_ref()
@@ -488,18 +538,24 @@ async fn handle_delete_sandbox_inner(
     state: &Arc<ServerState>,
     request: Request<DeleteSandboxRequest>,
 ) -> Result<Response<DeleteSandboxResponse>, Status> {
+    let principal = request.extensions().get::<crate::auth::principal::Principal>().cloned();
     let name = request.into_inner().name;
     if name.is_empty() {
         return Err(Status::invalid_argument("name is required"));
     }
 
-    let sandbox_id = state
+    // Ownership check: fetch sandbox, verify caller owns it before deleting.
+    let sandbox = state
         .store
         .get_message_by_name::<Sandbox>(&name)
         .await
-        .ok()
-        .flatten()
-        .map(|sandbox| sandbox.object_id().to_string());
+        .map_err(|e| Status::internal(format!("fetch sandbox failed: {e}")))?;
+
+    if let Some(ref sb) = sandbox {
+        check_sandbox_owner(sb, principal.as_ref(), state)?;
+    }
+
+    let sandbox_id = sandbox.map(|sb| sb.object_id().to_string());
     let deleted = state.compute.delete_sandbox(&name).await?;
     if deleted && let Some(sandbox_id) = sandbox_id {
         state.telemetry.end_sandbox_session(&sandbox_id);
@@ -567,11 +623,21 @@ pub(super) async fn handle_watch_sandbox(
     state: &Arc<ServerState>,
     request: Request<WatchSandboxRequest>,
 ) -> Result<Response<ReceiverStream<Result<SandboxStreamEvent, Status>>>, Status> {
+    let principal = request.extensions().get::<crate::auth::principal::Principal>().cloned();
     let req = request.into_inner();
     if req.id.is_empty() {
         return Err(Status::invalid_argument("id is required"));
     }
     let sandbox_id = req.id.clone();
+
+    // Ownership check before subscribing to any buses.
+    let sandbox = state
+        .store
+        .get_message::<Sandbox>(&sandbox_id)
+        .await
+        .map_err(|e| Status::internal(format!("fetch sandbox failed: {e}")))?
+        .ok_or_else(|| Status::not_found("sandbox not found"))?;
+    check_sandbox_owner(&sandbox, principal.as_ref(), state)?;
 
     let follow_status = req.follow_status;
     let follow_logs = req.follow_logs;
@@ -797,6 +863,7 @@ pub(super) async fn handle_exec_sandbox(
 ) -> Result<Response<ReceiverStream<Result<ExecSandboxEvent, Status>>>, Status> {
     use openshell_core::ObjectId;
 
+    let principal = request.extensions().get::<crate::auth::principal::Principal>().cloned();
     let req = request.into_inner();
     if req.sandbox_id.is_empty() {
         return Err(Status::invalid_argument("sandbox_id is required"));
@@ -817,6 +884,7 @@ pub(super) async fn handle_exec_sandbox(
         .await
         .map_err(|e| Status::internal(format!("fetch sandbox failed: {e}")))?
         .ok_or_else(|| Status::not_found("sandbox not found"))?;
+    check_sandbox_owner(&sandbox, principal.as_ref(), state)?;
 
     if SandboxPhase::try_from(sandbox.phase()).ok() != Some(SandboxPhase::Ready) {
         return Err(Status::failed_precondition("sandbox is not ready"));
@@ -912,6 +980,7 @@ pub(super) async fn handle_forward_tcp(
     >,
     Status,
 > {
+    let principal = request.extensions().get::<crate::auth::principal::Principal>().cloned();
     let mut inbound = request.into_inner();
     let first = inbound
         .message()
@@ -931,6 +1000,7 @@ pub(super) async fn handle_forward_tcp(
         .await
         .map_err(|e| Status::internal(format!("fetch sandbox failed: {e}")))?
         .ok_or_else(|| Status::not_found("sandbox not found"))?;
+    check_sandbox_owner(&sandbox, principal.as_ref(), state)?;
 
     if SandboxPhase::try_from(sandbox.phase()).ok() != Some(SandboxPhase::Ready) {
         return Err(Status::failed_precondition("sandbox is not ready"));
@@ -1245,6 +1315,7 @@ pub(super) async fn handle_exec_sandbox_interactive(
 ) -> Result<Response<ReceiverStream<Result<ExecSandboxEvent, Status>>>, Status> {
     use openshell_core::ObjectId;
 
+    let principal = request.extensions().get::<crate::auth::principal::Principal>().cloned();
     let mut input_stream = request.into_inner();
 
     let first_msg = input_stream
@@ -1260,6 +1331,7 @@ pub(super) async fn handle_exec_sandbox_interactive(
         .await
         .map_err(|e| Status::internal(format!("fetch sandbox failed: {e}")))?
         .ok_or_else(|| Status::not_found("sandbox not found"))?;
+    check_sandbox_owner(&sandbox, principal.as_ref(), state)?;
 
     if SandboxPhase::try_from(sandbox.phase()).ok() != Some(SandboxPhase::Ready) {
         return Err(Status::failed_precondition("sandbox is not ready"));
@@ -1322,6 +1394,7 @@ pub(super) async fn handle_create_ssh_session(
     state: &Arc<ServerState>,
     request: Request<CreateSshSessionRequest>,
 ) -> Result<Response<CreateSshSessionResponse>, Status> {
+    let principal = request.extensions().get::<crate::auth::principal::Principal>().cloned();
     let req = request.into_inner();
     if req.sandbox_id.is_empty() {
         return Err(Status::invalid_argument("sandbox_id is required"));
@@ -1333,6 +1406,7 @@ pub(super) async fn handle_create_ssh_session(
         .await
         .map_err(|e| Status::internal(format!("fetch sandbox failed: {e}")))?
         .ok_or_else(|| Status::not_found("sandbox not found"))?;
+    check_sandbox_owner(&sandbox, principal.as_ref(), state)?;
 
     if SandboxPhase::try_from(sandbox.phase()).ok() != Some(SandboxPhase::Ready) {
         return Err(Status::failed_precondition("sandbox is not ready"));
@@ -1398,6 +1472,7 @@ pub(super) async fn handle_revoke_ssh_session(
     state: &Arc<ServerState>,
     request: Request<RevokeSshSessionRequest>,
 ) -> Result<Response<RevokeSshSessionResponse>, Status> {
+    let principal = request.extensions().get::<crate::auth::principal::Principal>().cloned();
     let token = request.into_inner().token;
     if token.is_empty() {
         return Err(Status::invalid_argument("token is required"));
@@ -1412,6 +1487,13 @@ pub(super) async fn handle_revoke_ssh_session(
     let Some(mut session) = session else {
         return Ok(Response::new(RevokeSshSessionResponse { revoked: false }));
     };
+
+    // Ownership check: look up the sandbox referenced by this session.
+    if !session.sandbox_id.is_empty() {
+        if let Ok(Some(sandbox)) = state.store.get_message::<Sandbox>(&session.sandbox_id).await {
+            check_sandbox_owner(&sandbox, principal.as_ref(), state)?;
+        }
+    }
 
     let resource_version = session
         .metadata
