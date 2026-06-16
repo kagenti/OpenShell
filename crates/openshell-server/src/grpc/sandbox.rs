@@ -1528,14 +1528,13 @@ pub(super) async fn handle_revoke_ssh_session(
     };
 
     // Ownership check: look up the sandbox referenced by this session.
-    if !session.sandbox_id.is_empty() {
-        if let Ok(Some(sandbox)) = state
+    if !session.sandbox_id.is_empty()
+        && let Ok(Some(sandbox)) = state
             .store
             .get_message::<Sandbox>(&session.sandbox_id)
             .await
-        {
-            check_sandbox_owner(&sandbox, principal.as_ref(), state)?;
-        }
+    {
+        check_sandbox_owner(&sandbox, principal.as_ref(), state)?;
     }
 
     let resource_version = session

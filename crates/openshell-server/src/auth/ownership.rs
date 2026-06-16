@@ -7,8 +7,12 @@
 //! verified caller identity) and gates access on subsequent operations. Admin
 //! callers bypass the ownership check.
 
-use std::collections::HashMap;
+#![allow(clippy::result_large_err)]
 
+use std::collections::HashMap;
+use std::fmt::Write;
+
+use sha2::{Digest, Sha256};
 use tonic::Status;
 
 use super::identity::Identity;
@@ -39,8 +43,6 @@ pub fn sanitize_subject(subject: &str) -> Result<String, Status> {
     }
 
     // Fallback: hex SHA-256 truncated to 63 chars (always valid).
-    use sha2::{Digest, Sha256};
-    use std::fmt::Write;
     let hash = Sha256::digest(subject.as_bytes());
     let mut hex = String::with_capacity(64);
     for byte in &hash {
@@ -86,14 +88,10 @@ pub fn check_owner(
         return Ok(());
     };
 
-    let identity = match principal_identity(principal) {
-        Some(id) => id,
-        None => {
-            // Anonymous caller on an owned sandbox → deny.
-            return Err(Status::permission_denied(
-                "sandbox is owned; authenticated identity required",
-            ));
-        }
+    let Some(identity) = principal_identity(principal) else {
+        return Err(Status::permission_denied(
+            "sandbox is owned; authenticated identity required",
+        ));
     };
 
     // Admin bypass.
@@ -118,12 +116,8 @@ pub fn owner_selector(
     existing_selector: &str,
     admin_role: &str,
 ) -> Result<String, Status> {
-    let identity = match principal_identity(principal) {
-        Some(id) => id,
-        None => {
-            // Anonymous → no owner filtering (backward compat).
-            return Ok(existing_selector.to_string());
-        }
+    let Some(identity) = principal_identity(principal) else {
+        return Ok(existing_selector.to_string());
     };
 
     // Admin bypass — see all sandboxes.
@@ -145,9 +139,9 @@ pub fn owner_selector(
 fn require_identity(principal: Option<&Principal>) -> Result<&Identity, Status> {
     match principal {
         Some(Principal::User(user)) => Ok(&user.identity),
-        Some(Principal::Sandbox(_)) | Some(Principal::Anonymous) | None => Err(
-            Status::unauthenticated("authenticated user identity required for sandbox operations"),
-        ),
+        Some(Principal::Sandbox(_) | Principal::Anonymous) | None => Err(Status::unauthenticated(
+            "authenticated user identity required for sandbox operations",
+        )),
     }
 }
 
