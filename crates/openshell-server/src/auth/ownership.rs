@@ -103,9 +103,7 @@ pub fn check_owner(
 
     let caller_value = sanitize_subject(&identity.subject)?;
     if caller_value != *owner_value {
-        return Err(Status::permission_denied(
-            "you do not own this sandbox",
-        ));
+        return Err(Status::permission_denied("you do not own this sandbox"));
     }
 
     Ok(())
@@ -368,7 +366,8 @@ mod tests {
 
     #[test]
     fn owner_selector_anonymous_no_filter() {
-        let result = owner_selector(Some(&Principal::Anonymous), "env=dev", "openshell-admin").unwrap();
+        let result =
+            owner_selector(Some(&Principal::Anonymous), "env=dev", "openshell-admin").unwrap();
         assert_eq!(result, "env=dev");
     }
 

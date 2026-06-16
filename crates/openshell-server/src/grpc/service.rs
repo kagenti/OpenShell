@@ -25,7 +25,10 @@ pub(super) async fn handle_expose_service(
     state: &Arc<ServerState>,
     request: Request<ExposeServiceRequest>,
 ) -> Result<Response<ServiceEndpointResponse>, Status> {
-    let principal = request.extensions().get::<crate::auth::principal::Principal>().cloned();
+    let principal = request
+        .extensions()
+        .get::<crate::auth::principal::Principal>()
+        .cloned();
     let req = request.into_inner();
     validate_endpoint_name("sandbox", &req.sandbox, MAX_SANDBOX_NAME_LEN)?;
     validate_optional_endpoint_name("service", &req.service, MAX_SERVICE_NAME_LEN)?;
@@ -130,7 +133,10 @@ pub(super) async fn handle_get_service(
     state: &Arc<ServerState>,
     request: Request<GetServiceRequest>,
 ) -> Result<Response<ServiceEndpointResponse>, Status> {
-    let principal = request.extensions().get::<crate::auth::principal::Principal>().cloned();
+    let principal = request
+        .extensions()
+        .get::<crate::auth::principal::Principal>()
+        .cloned();
     let req = request.into_inner();
     validate_endpoint_name("sandbox", &req.sandbox, MAX_SANDBOX_NAME_LEN)?;
     validate_optional_endpoint_name("service", &req.service, MAX_SERVICE_NAME_LEN)?;
@@ -183,7 +189,10 @@ pub(super) async fn handle_delete_service(
     state: &Arc<ServerState>,
     request: Request<DeleteServiceRequest>,
 ) -> Result<Response<DeleteServiceResponse>, Status> {
-    let principal = request.extensions().get::<crate::auth::principal::Principal>().cloned();
+    let principal = request
+        .extensions()
+        .get::<crate::auth::principal::Principal>()
+        .cloned();
     let req = request.into_inner();
     validate_endpoint_name("sandbox", &req.sandbox, MAX_SANDBOX_NAME_LEN)?;
     validate_optional_endpoint_name("service", &req.service, MAX_SERVICE_NAME_LEN)?;

@@ -143,7 +143,10 @@ async fn handle_create_sandbox_inner(
     state: &Arc<ServerState>,
     request: Request<CreateSandboxRequest>,
 ) -> Result<Response<SandboxResponse>, Status> {
-    let principal = request.extensions().get::<crate::auth::principal::Principal>().cloned();
+    let principal = request
+        .extensions()
+        .get::<crate::auth::principal::Principal>()
+        .cloned();
     let mut request = request.into_inner();
     let spec = request
         .spec
@@ -260,7 +263,10 @@ pub(super) async fn handle_get_sandbox(
     state: &Arc<ServerState>,
     request: Request<GetSandboxRequest>,
 ) -> Result<Response<SandboxResponse>, Status> {
-    let principal = request.extensions().get::<crate::auth::principal::Principal>().cloned();
+    let principal = request
+        .extensions()
+        .get::<crate::auth::principal::Principal>()
+        .cloned();
     let name = request.into_inner().name;
     if name.is_empty() {
         return Err(Status::invalid_argument("name is required"));
@@ -283,7 +289,10 @@ pub(super) async fn handle_list_sandboxes(
     state: &Arc<ServerState>,
     request: Request<ListSandboxesRequest>,
 ) -> Result<Response<ListSandboxesResponse>, Status> {
-    let principal = request.extensions().get::<crate::auth::principal::Principal>().cloned();
+    let principal = request
+        .extensions()
+        .get::<crate::auth::principal::Principal>()
+        .cloned();
     let request = request.into_inner();
     let limit = clamp_limit(request.limit, 100, MAX_PAGE_SIZE);
 
@@ -317,7 +326,10 @@ pub(super) async fn handle_list_sandbox_providers(
     state: &Arc<ServerState>,
     request: Request<ListSandboxProvidersRequest>,
 ) -> Result<Response<ListSandboxProvidersResponse>, Status> {
-    let principal = request.extensions().get::<crate::auth::principal::Principal>().cloned();
+    let principal = request
+        .extensions()
+        .get::<crate::auth::principal::Principal>()
+        .cloned();
     let sandbox = sandbox_by_name(state, &request.into_inner().sandbox_name).await?;
     check_sandbox_owner(&sandbox, principal.as_ref(), state)?;
     let providers = providers_for_sandbox(state, &sandbox).await?;
@@ -328,7 +340,10 @@ pub(super) async fn handle_attach_sandbox_provider(
     state: &Arc<ServerState>,
     request: Request<AttachSandboxProviderRequest>,
 ) -> Result<Response<AttachSandboxProviderResponse>, Status> {
-    let principal = request.extensions().get::<crate::auth::principal::Principal>().cloned();
+    let principal = request
+        .extensions()
+        .get::<crate::auth::principal::Principal>()
+        .cloned();
     let request = request.into_inner();
     if request.provider_name.is_empty() {
         return Err(Status::invalid_argument("provider_name is required"));
@@ -444,7 +459,10 @@ pub(super) async fn handle_detach_sandbox_provider(
     state: &Arc<ServerState>,
     request: Request<DetachSandboxProviderRequest>,
 ) -> Result<Response<DetachSandboxProviderResponse>, Status> {
-    let principal = request.extensions().get::<crate::auth::principal::Principal>().cloned();
+    let principal = request
+        .extensions()
+        .get::<crate::auth::principal::Principal>()
+        .cloned();
     let request = request.into_inner();
     if request.provider_name.is_empty() {
         return Err(Status::invalid_argument("provider_name is required"));
@@ -538,7 +556,10 @@ async fn handle_delete_sandbox_inner(
     state: &Arc<ServerState>,
     request: Request<DeleteSandboxRequest>,
 ) -> Result<Response<DeleteSandboxResponse>, Status> {
-    let principal = request.extensions().get::<crate::auth::principal::Principal>().cloned();
+    let principal = request
+        .extensions()
+        .get::<crate::auth::principal::Principal>()
+        .cloned();
     let name = request.into_inner().name;
     if name.is_empty() {
         return Err(Status::invalid_argument("name is required"));
@@ -623,7 +644,10 @@ pub(super) async fn handle_watch_sandbox(
     state: &Arc<ServerState>,
     request: Request<WatchSandboxRequest>,
 ) -> Result<Response<ReceiverStream<Result<SandboxStreamEvent, Status>>>, Status> {
-    let principal = request.extensions().get::<crate::auth::principal::Principal>().cloned();
+    let principal = request
+        .extensions()
+        .get::<crate::auth::principal::Principal>()
+        .cloned();
     let req = request.into_inner();
     if req.id.is_empty() {
         return Err(Status::invalid_argument("id is required"));
@@ -863,7 +887,10 @@ pub(super) async fn handle_exec_sandbox(
 ) -> Result<Response<ReceiverStream<Result<ExecSandboxEvent, Status>>>, Status> {
     use openshell_core::ObjectId;
 
-    let principal = request.extensions().get::<crate::auth::principal::Principal>().cloned();
+    let principal = request
+        .extensions()
+        .get::<crate::auth::principal::Principal>()
+        .cloned();
     let req = request.into_inner();
     if req.sandbox_id.is_empty() {
         return Err(Status::invalid_argument("sandbox_id is required"));
@@ -980,7 +1007,10 @@ pub(super) async fn handle_forward_tcp(
     >,
     Status,
 > {
-    let principal = request.extensions().get::<crate::auth::principal::Principal>().cloned();
+    let principal = request
+        .extensions()
+        .get::<crate::auth::principal::Principal>()
+        .cloned();
     let mut inbound = request.into_inner();
     let first = inbound
         .message()
@@ -1315,7 +1345,10 @@ pub(super) async fn handle_exec_sandbox_interactive(
 ) -> Result<Response<ReceiverStream<Result<ExecSandboxEvent, Status>>>, Status> {
     use openshell_core::ObjectId;
 
-    let principal = request.extensions().get::<crate::auth::principal::Principal>().cloned();
+    let principal = request
+        .extensions()
+        .get::<crate::auth::principal::Principal>()
+        .cloned();
     let mut input_stream = request.into_inner();
 
     let first_msg = input_stream
@@ -1394,7 +1427,10 @@ pub(super) async fn handle_create_ssh_session(
     state: &Arc<ServerState>,
     request: Request<CreateSshSessionRequest>,
 ) -> Result<Response<CreateSshSessionResponse>, Status> {
-    let principal = request.extensions().get::<crate::auth::principal::Principal>().cloned();
+    let principal = request
+        .extensions()
+        .get::<crate::auth::principal::Principal>()
+        .cloned();
     let req = request.into_inner();
     if req.sandbox_id.is_empty() {
         return Err(Status::invalid_argument("sandbox_id is required"));
@@ -1472,7 +1508,10 @@ pub(super) async fn handle_revoke_ssh_session(
     state: &Arc<ServerState>,
     request: Request<RevokeSshSessionRequest>,
 ) -> Result<Response<RevokeSshSessionResponse>, Status> {
-    let principal = request.extensions().get::<crate::auth::principal::Principal>().cloned();
+    let principal = request
+        .extensions()
+        .get::<crate::auth::principal::Principal>()
+        .cloned();
     let token = request.into_inner().token;
     if token.is_empty() {
         return Err(Status::invalid_argument("token is required"));
@@ -1490,7 +1529,11 @@ pub(super) async fn handle_revoke_ssh_session(
 
     // Ownership check: look up the sandbox referenced by this session.
     if !session.sandbox_id.is_empty() {
-        if let Ok(Some(sandbox)) = state.store.get_message::<Sandbox>(&session.sandbox_id).await {
+        if let Ok(Some(sandbox)) = state
+            .store
+            .get_message::<Sandbox>(&session.sandbox_id)
+            .await
+        {
             check_sandbox_owner(&sandbox, principal.as_ref(), state)?;
         }
     }
