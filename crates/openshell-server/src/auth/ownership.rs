@@ -188,19 +188,20 @@ pub fn scoped_name(owner: &str, name: &str) -> String {
 /// If the key contains a `/`, the part after the first `/` is the display name.
 /// If no `/`, the key *is* the display name (shared/legacy provider).
 pub fn display_name(db_key: &str) -> &str {
-    match db_key.find(SCOPE_SEPARATOR) {
-        Some(pos) => &db_key[pos + 1..],
-        None => db_key,
-    }
+    db_key
+        .find(SCOPE_SEPARATOR)
+        .map_or(db_key, |pos| &db_key[pos + 1..])
 }
 
 /// Extract the owner prefix from a scoped DB key, if present.
+#[allow(dead_code)] // Used in tests; needed for admin addressability (TODO).
 pub fn owner_prefix(db_key: &str) -> Option<&str> {
     db_key.find(SCOPE_SEPARATOR).map(|pos| &db_key[..pos])
 }
 
 /// Build the scoped DB key for the given principal, or return the raw name for
 /// anonymous/admin callers.
+#[allow(dead_code)] // Used in tests; needed for admin addressability (TODO).
 pub fn scoped_name_for_principal(
     name: &str,
     principal: Option<&Principal>,

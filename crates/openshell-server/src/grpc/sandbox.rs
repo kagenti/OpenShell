@@ -516,7 +516,7 @@ pub(super) async fn handle_detach_sandbox_provider(
         state.store.as_ref(),
         &request.provider_name,
         principal.as_ref(),
-        &admin_role_name(state),
+        admin_role_name(state),
     )
     .await
     .ok();

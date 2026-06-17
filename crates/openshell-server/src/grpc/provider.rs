@@ -175,10 +175,10 @@ pub(super) async fn create_provider_record(
 
     // Scope the DB name: if the provider has an owner label, prefix the name
     // with `{owner}/` so two users can have the same user-visible name.
-    if let Some(metadata) = provider.metadata.as_mut() {
-        if let Some(owner) = metadata.labels.get(OWNER_LABEL).cloned() {
-            metadata.name = scoped_name(&owner, &metadata.name);
-        }
+    if let Some(metadata) = provider.metadata.as_mut()
+        && let Some(owner) = metadata.labels.get(OWNER_LABEL).cloned()
+    {
+        metadata.name = scoped_name(&owner, &metadata.name);
     }
 
     // Generate UUID for database row and update metadata.id to match
