@@ -81,6 +81,9 @@ pub(super) fn check_sandbox_owner(
 }
 
 /// Strip owner prefixes from sandbox spec.providers before returning to user.
+///
+/// TODO: preserve scoped keys for admin principals so they can distinguish
+/// between multiple users' identically-named providers in list/get responses.
 fn strip_sandbox_provider_prefixes(mut sandbox: Sandbox) -> Sandbox {
     if let Some(ref mut spec) = sandbox.spec {
         for name in &mut spec.providers {
@@ -395,10 +398,7 @@ pub(super) async fn handle_attach_sandbox_provider(
     .await
     .map_err(|err| {
         if err.code() == tonic::Code::NotFound {
-            Status::failed_precondition(format!(
-                "provider '{}' not found",
-                request.provider_name
-            ))
+            Status::failed_precondition(format!("provider '{}' not found", request.provider_name))
         } else {
             err
         }
@@ -423,10 +423,7 @@ pub(super) async fn handle_attach_sandbox_provider(
     // Pre-check: fail fast if already at MAX_PROVIDERS limit (avoid spurious CAS conflicts)
     // Note: This is an optimization; the CAS closure rechecks after dedupe in case of races
     if spec.providers.len() >= MAX_PROVIDERS
-        && !spec
-            .providers
-            .iter()
-            .any(|name| name == &provider_db_key)
+        && !spec.providers.iter().any(|name| name == &provider_db_key)
     {
         return Err(Status::invalid_argument(format!(
             "providers list exceeds maximum ({MAX_PROVIDERS})"
@@ -461,7 +458,10 @@ pub(super) async fn handle_attach_sandbox_provider(
                 };
 
                 dedupe_provider_names(&mut spec.providers);
-                if !spec.providers.iter().any(|name| name == &provider_name_for_cas)
+                if !spec
+                    .providers
+                    .iter()
+                    .any(|name| name == &provider_name_for_cas)
                     && spec.providers.len() < MAX_PROVIDERS
                 {
                     spec.providers.push(provider_name_for_cas.clone());
@@ -509,14 +509,27 @@ pub(super) async fn handle_detach_sandbox_provider(
         )));
     }
 
-    // Resolve user-visible name to DB key (spec stores DB keys)
+    // Resolve user-visible name to DB key (spec stores DB keys).
+    // We resolve optimistically — if the provider doesn't exist at all, we still
+    // attempt the detach using the raw name (it may have been deleted after attach).
     let provider_db_key = resolve_provider_db_key(
         state.store.as_ref(),
         &request.provider_name,
         principal.as_ref(),
         &admin_role_name(state),
     )
-    .await?;
+    .await
+    .ok();
+
+    // Build the set of keys to try detaching. Handles the ambiguity where the
+    // sandbox may have the shared variant (`openai`) or the owned variant
+    // (`alice/openai`) attached — try both the resolved key and the raw name.
+    let raw_name = request.provider_name.clone();
+    let detach_keys: Vec<String> = match provider_db_key {
+        Some(ref key) if *key != raw_name => vec![key.clone(), raw_name.clone()],
+        Some(ref key) => vec![key.clone()],
+        None => vec![raw_name.clone()],
+    };
 
     let _sandbox_sync_guard = state.compute.sandbox_sync_guard().await;
     let sandbox = sandbox_by_name(state, &request.sandbox_name).await?;
@@ -534,7 +547,6 @@ pub(super) async fn handle_detach_sandbox_provider(
         .as_ref()
         .ok_or_else(|| Status::internal("sandbox spec is missing"))?;
 
-    let provider_name_for_cas = provider_db_key.clone();
     let detached = Arc::new(AtomicBool::new(false));
     let detached_clone = detached.clone();
 
@@ -545,15 +557,14 @@ pub(super) async fn handle_detach_sandbox_provider(
             request.expected_resource_version,
             |sandbox| {
                 let Some(ref mut spec) = sandbox.spec else {
-                    // Spec should always exist post-creation; if missing, fail CAS to surface error
                     return;
                 };
 
                 let before_len = spec.providers.len();
-                spec.providers.retain(|name| name != &provider_name_for_cas);
+                spec.providers
+                    .retain(|name| !detach_keys.iter().any(|k| k == name));
                 if spec.providers.len() != before_len {
                     detached_clone.store(true, Ordering::Relaxed);
-                    // Only dedupe after making a change
                     dedupe_provider_names(&mut spec.providers);
                 }
             },

@@ -89,6 +89,9 @@ fn redact_provider_credentials(mut provider: Provider) -> Provider {
 
 /// Strip the owner prefix from a provider's metadata.name for display.
 /// DB stores `{owner}/{name}` but users see just `{name}`.
+///
+/// TODO: preserve scoped keys for admin principals so they can distinguish
+/// between multiple users' identically-named providers.
 fn strip_name_prefix(mut provider: Provider) -> Provider {
     if let Some(metadata) = provider.metadata.as_mut() {
         metadata.name = crate::auth::ownership::display_name(&metadata.name).to_string();
@@ -263,6 +266,12 @@ pub(super) async fn get_provider_record(
 
 /// Internal lookup by exact DB key (scoped or unscoped). Used by sandbox env
 /// resolution and inference routing where the stored key is already correct.
+///
+/// # Safety (credential exposure)
+///
+/// Returns the provider with UN-redacted credentials. Callers MUST wrap with
+/// `prepare_provider_response` (or at minimum `redact_provider_credentials`)
+/// before returning to users over gRPC.
 pub(super) async fn get_provider_record_by_db_key(
     store: &Store,
     db_key: &str,
@@ -1729,10 +1738,7 @@ pub(super) async fn handle_rotate_provider_credential(
     }
     let provider = resolve_and_check_provider(state, provider_name, principal.as_ref()).await?;
     // Use the resolved DB key for internal refresh operations.
-    let db_key = provider
-        .metadata
-        .as_ref()
-        .map_or("", |m| m.name.as_str());
+    let db_key = provider.metadata.as_ref().map_or("", |m| m.name.as_str());
     let refresh_state = crate::provider_refresh::refresh_provider_credential(
         state.store.as_ref(),
         db_key,
@@ -1834,10 +1840,7 @@ pub(super) async fn handle_delete_provider(
         })?;
 
     // Use the resolved DB key (scoped name) for deletion.
-    let db_key = existing
-        .metadata
-        .as_ref()
-        .map_or("", |m| m.name.as_str());
+    let db_key = existing.metadata.as_ref().map_or("", |m| m.name.as_str());
     let provider_profile = provider_profile_for_name(state.store.as_ref(), db_key).await;
     let result = delete_provider_record(state.store.as_ref(), db_key).await;
     match result {
@@ -5372,10 +5375,9 @@ mod tests {
                 "openai"
             );
 
-            let bob_resp =
-                handle_get_provider(&state, get_request_with_principal("openai", &bob))
-                    .await
-                    .unwrap();
+            let bob_resp = handle_get_provider(&state, get_request_with_principal("openai", &bob))
+                .await
+                .unwrap();
             assert_eq!(
                 bob_resp.into_inner().provider.unwrap().object_name(),
                 "openai"
@@ -5393,10 +5395,9 @@ mod tests {
                 .unwrap();
 
             let p2 = provider_with_values("openai", "generic");
-            let err =
-                handle_create_provider(&state, create_request_with_principal(p2, &alice))
-                    .await
-                    .unwrap_err();
+            let err = handle_create_provider(&state, create_request_with_principal(p2, &alice))
+                .await
+                .unwrap_err();
             assert_eq!(err.code(), Code::AlreadyExists);
         }
 
@@ -5452,10 +5453,9 @@ mod tests {
             .unwrap();
 
             // Alice's GET resolves to her own (has ALICE_KEY, not SHARED_KEY)
-            let resp =
-                handle_get_provider(&state, get_request_with_principal("openai", &alice))
-                    .await
-                    .unwrap();
+            let resp = handle_get_provider(&state, get_request_with_principal("openai", &alice))
+                .await
+                .unwrap();
             let p = resp.into_inner().provider.unwrap();
             assert!(
                 p.credentials.contains_key("ALICE_KEY"),
@@ -5497,10 +5497,9 @@ mod tests {
             .unwrap();
 
             // Alice can still GET it via fallback
-            let resp =
-                handle_get_provider(&state, get_request_with_principal("openai", &alice))
-                    .await
-                    .unwrap();
+            let resp = handle_get_provider(&state, get_request_with_principal("openai", &alice))
+                .await
+                .unwrap();
             let p = resp.into_inner().provider.unwrap();
             assert!(p.credentials.contains_key("SHARED_KEY"));
         }
@@ -5516,11 +5515,15 @@ mod tests {
                 .unwrap();
 
             // GET response shows display name, not scoped key
-            let resp =
-                handle_get_provider(&state, get_request_with_principal("openai", &alice))
-                    .await
-                    .unwrap();
-            let name = resp.into_inner().provider.unwrap().object_name().to_string();
+            let resp = handle_get_provider(&state, get_request_with_principal("openai", &alice))
+                .await
+                .unwrap();
+            let name = resp
+                .into_inner()
+                .provider
+                .unwrap()
+                .object_name()
+                .to_string();
             assert_eq!(name, "openai");
             assert!(
                 !name.contains('/'),
@@ -5564,17 +5567,15 @@ mod tests {
                 .unwrap();
 
             // Bob's is still there
-            let resp =
-                handle_get_provider(&state, get_request_with_principal("openai", &bob))
-                    .await
-                    .unwrap();
+            let resp = handle_get_provider(&state, get_request_with_principal("openai", &bob))
+                .await
+                .unwrap();
             assert_eq!(resp.into_inner().provider.unwrap().object_name(), "openai");
 
             // Alice's is gone
-            let err =
-                handle_get_provider(&state, get_request_with_principal("openai", &alice))
-                    .await
-                    .unwrap_err();
+            let err = handle_get_provider(&state, get_request_with_principal("openai", &alice))
+                .await
+                .unwrap_err();
             assert_eq!(err.code(), Code::NotFound);
         }
     }

@@ -478,7 +478,10 @@ mod tests {
 
     #[test]
     fn scoped_name_construction() {
-        assert_eq!(scoped_name("alice-uuid-1234", "openai"), "alice-uuid-1234/openai");
+        assert_eq!(
+            scoped_name("alice-uuid-1234", "openai"),
+            "alice-uuid-1234/openai"
+        );
     }
 
     #[test]
@@ -493,7 +496,10 @@ mod tests {
 
     #[test]
     fn owner_prefix_extracts_owner() {
-        assert_eq!(owner_prefix("alice-uuid-1234/openai"), Some("alice-uuid-1234"));
+        assert_eq!(
+            owner_prefix("alice-uuid-1234/openai"),
+            Some("alice-uuid-1234")
+        );
     }
 
     #[test]
