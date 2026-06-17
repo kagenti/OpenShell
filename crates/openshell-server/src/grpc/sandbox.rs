@@ -186,6 +186,7 @@ async fn handle_create_sandbox_inner(
     // Users pass visible names ("openai"); we store the resolved DB key
     // ("{owner}/openai" or "openai" for shared) in spec.providers so that
     // internal lookups are single-pass.
+    let admin_role = admin_role_name(state);
     let mut resolved_providers = Vec::with_capacity(spec.providers.len());
     for name in &spec.providers {
         let record = crate::auth::ownership::resolve_scoped_name(

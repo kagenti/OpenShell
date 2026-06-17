@@ -3215,7 +3215,9 @@ mod tests {
         let duplicate_err = create_provider_record(&store, created).await.unwrap_err();
         assert_eq!(duplicate_err.code(), Code::AlreadyExists);
 
-        let loaded = get_provider_record(&store, "gitlab-local").await.unwrap();
+        let loaded = get_provider_record(&store, "gitlab-local", None, "")
+            .await
+            .unwrap();
         assert_eq!(loaded.object_id(), provider_id);
 
         let listed = list_provider_records(&store, 100, 0).await.unwrap();
@@ -3285,7 +3287,7 @@ mod tests {
             .unwrap();
         assert!(!deleted_again);
 
-        let missing = get_provider_record(&store, "gitlab-local")
+        let missing = get_provider_record(&store, "gitlab-local", None, "")
             .await
             .unwrap_err();
         assert_eq!(missing.code(), Code::NotFound);
@@ -3654,7 +3656,7 @@ mod tests {
         .unwrap();
         assert!(vertex_empty.credentials.is_empty());
 
-        let get_err = get_provider_record(store, "").await.unwrap_err();
+        let get_err = get_provider_record(store, "", None, "").await.unwrap_err();
         assert_eq!(get_err.code(), Code::InvalidArgument);
 
         let delete_err = delete_provider_record(store, "").await.unwrap_err();
