@@ -224,10 +224,10 @@ pub fn scoped_name_for_principal(
 /// Resolution order:
 /// 1. Try `{owner}/{name}` (user's own provider) — non-admin only
 /// 2. Fall back to `{name}` (shared/legacy provider, no owner prefix)
-///    - If found and owned by another user: PermissionDenied (non-admin)
+///    - If found and owned by another user: `PermissionDenied` (non-admin)
 /// 3. Suffix scan for `*/{name}` (cross-user detection)
 ///    - If found and admin: return the match
-///    - If found and non-admin: PermissionDenied
+///    - If found and non-admin: `PermissionDenied`
 ///
 /// Admin callers with explicit scoped name (contains '/') resolve directly.
 /// Anonymous principals resolve the raw name directly (backward compat).
@@ -279,12 +279,13 @@ pub async fn resolve_scoped_name(
         if let Some(ref labels_json) = record.labels {
             let labels: HashMap<String, String> =
                 serde_json::from_str(labels_json).unwrap_or_default();
-            if let Some(record_owner) = labels.get(OWNER_LABEL) {
-                if *record_owner != caller_owner && !is_admin {
-                    return Err(Status::permission_denied(
-                        "provider is owned by another user",
-                    ));
-                }
+            if let Some(record_owner) = labels.get(OWNER_LABEL)
+                && *record_owner != caller_owner
+                && !is_admin
+            {
+                return Err(Status::permission_denied(
+                    "provider is owned by another user",
+                ));
             }
         }
         return Ok(shared);
