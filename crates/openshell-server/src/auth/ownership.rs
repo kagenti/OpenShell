@@ -299,10 +299,8 @@ pub async fn resolve_scoped_name(
         .await
         .map_err(|e| Status::internal(format!("suffix search failed: {e}")))?;
 
-    if is_admin {
-        if let Some(record) = candidates.into_iter().next() {
-            return Ok(Some(record));
-        }
+    if is_admin && let Some(record) = candidates.into_iter().next() {
+        return Ok(Some(record));
     }
 
     Ok(None)
