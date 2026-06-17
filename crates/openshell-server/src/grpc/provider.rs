@@ -5078,11 +5078,12 @@ mod tests {
                 .await
                 .unwrap();
 
+            // Information-hiding: non-owner sees NotFound, not PermissionDenied
             let err =
                 handle_get_provider(&state, get_request_with_principal("alice-provider", &bob))
                     .await
                     .unwrap_err();
-            assert_eq!(err.code(), Code::PermissionDenied);
+            assert_eq!(err.code(), Code::NotFound);
         }
 
         #[tokio::test]
@@ -5250,10 +5251,11 @@ mod tests {
                 credential_expires_at_ms: HashMap::new(),
             };
 
+            // Information-hiding: non-owner sees NotFound, not PermissionDenied
             let err = handle_update_provider(&state, update_request_with_principal(update, &bob))
                 .await
                 .unwrap_err();
-            assert_eq!(err.code(), Code::PermissionDenied);
+            assert_eq!(err.code(), Code::NotFound);
         }
 
         #[tokio::test]
@@ -5286,13 +5288,14 @@ mod tests {
                 .await
                 .unwrap();
 
+            // Information-hiding: non-owner sees NotFound, not PermissionDenied
             let err = handle_delete_provider(
                 &state,
                 delete_request_with_principal("alice-provider", &bob),
             )
             .await
             .unwrap_err();
-            assert_eq!(err.code(), Code::PermissionDenied);
+            assert_eq!(err.code(), Code::NotFound);
         }
 
         #[tokio::test]

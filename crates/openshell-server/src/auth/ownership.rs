@@ -291,19 +291,18 @@ pub async fn resolve_scoped_name(
         return Ok(shared);
     }
 
-    // Step 3: Both missed — suffix scan for cross-user detection
+    // Step 3: Both missed — suffix scan for cross-user detection.
+    // Admin callers get access to any user's provider. Non-admin callers
+    // get None (surfaced as NotFound) for information-hiding security.
     let candidates = store
         .find_by_name_suffix(object_type, name)
         .await
         .map_err(|e| Status::internal(format!("suffix search failed: {e}")))?;
 
-    if let Some(record) = candidates.into_iter().next() {
-        if is_admin {
+    if is_admin {
+        if let Some(record) = candidates.into_iter().next() {
             return Ok(Some(record));
         }
-        return Err(Status::permission_denied(
-            "provider is owned by another user",
-        ));
     }
 
     Ok(None)
