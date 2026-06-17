@@ -419,8 +419,7 @@ mod tests {
 
         // User with provider:write scope and user role can call write methods
         // (ownership enforcement happens in the handler, not RBAC).
-        let user_writer =
-            identity_with_roles_and_scopes(&["openshell-user"], &["provider:write"]);
+        let user_writer = identity_with_roles_and_scopes(&["openshell-user"], &["provider:write"]);
         for method in [
             "/openshell.v1.OpenShell/ConfigureProviderRefresh",
             "/openshell.v1.OpenShell/RotateProviderCredential",

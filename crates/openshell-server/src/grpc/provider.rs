@@ -226,7 +226,9 @@ async fn list_provider_records_for_principal(
             if !admin_role.is_empty() && user.identity.roles.iter().any(|r| r == admin_role) {
                 None // Admin sees all
             } else {
-                Some(crate::auth::ownership::sanitize_subject(&user.identity.subject)?)
+                Some(crate::auth::ownership::sanitize_subject(
+                    &user.identity.subject,
+                )?)
             }
         }
         _ => None, // Anonymous/sandbox/none → see all (backward compat)
@@ -243,7 +245,7 @@ async fn list_provider_records_for_principal(
         .filter(|provider| {
             let labels = provider.metadata.as_ref().map(|m| &m.labels);
             match labels.and_then(|l| l.get(OWNER_LABEL)) {
-                None => true,              // Shared provider (no owner) → visible
+                None => true,                 // Shared provider (no owner) → visible
                 Some(v) => *v == owner_value, // Owned → visible only if caller's
             }
         })
@@ -4803,9 +4805,7 @@ mod tests {
                 SandboxIndex::new(),
                 SandboxWatchBus::new(),
                 TracingLogBus::new(),
-                std::sync::Arc::new(
-                    crate::supervisor_session::SupervisorSessionRegistry::new(),
-                ),
+                std::sync::Arc::new(crate::supervisor_session::SupervisorSessionRegistry::new()),
                 None,
                 None,
             ))
@@ -4828,10 +4828,7 @@ mod tests {
                 identity: Identity {
                     subject: "admin-uuid".to_string(),
                     display_name: None,
-                    roles: vec![
-                        "openshell-admin".to_string(),
-                        "openshell-user".to_string(),
-                    ],
+                    roles: vec!["openshell-admin".to_string(), "openshell-user".to_string()],
                     scopes: vec![],
                     provider: IdentityProvider::Oidc,
                 },
@@ -4860,9 +4857,7 @@ mod tests {
             req
         }
 
-        fn list_request_with_principal(
-            principal: &Principal,
-        ) -> Request<ListProvidersRequest> {
+        fn list_request_with_principal(principal: &Principal) -> Request<ListProvidersRequest> {
             let mut req = Request::new(ListProvidersRequest {
                 limit: 100,
                 offset: 0,
@@ -4900,12 +4895,10 @@ mod tests {
             let alice = user_principal("alice-uuid");
             let provider = provider_with_values("alice-provider", "generic");
 
-            let response = handle_create_provider(
-                &state,
-                create_request_with_principal(provider, &alice),
-            )
-            .await
-            .unwrap();
+            let response =
+                handle_create_provider(&state, create_request_with_principal(provider, &alice))
+                    .await
+                    .unwrap();
 
             let created = response.into_inner().provider.unwrap();
             let labels = &created.metadata.as_ref().unwrap().labels;
@@ -4918,20 +4911,18 @@ mod tests {
             let alice = user_principal("alice-uuid");
             let provider = provider_with_values("alice-provider", "generic");
 
-            handle_create_provider(
-                &state,
-                create_request_with_principal(provider, &alice),
-            )
-            .await
-            .unwrap();
+            handle_create_provider(&state, create_request_with_principal(provider, &alice))
+                .await
+                .unwrap();
 
-            let response = handle_get_provider(
-                &state,
-                get_request_with_principal("alice-provider", &alice),
-            )
-            .await
-            .unwrap();
-            assert_eq!(response.into_inner().provider.unwrap().object_name(), "alice-provider");
+            let response =
+                handle_get_provider(&state, get_request_with_principal("alice-provider", &alice))
+                    .await
+                    .unwrap();
+            assert_eq!(
+                response.into_inner().provider.unwrap().object_name(),
+                "alice-provider"
+            );
         }
 
         #[tokio::test]
@@ -4941,19 +4932,14 @@ mod tests {
             let bob = user_principal("bob-uuid");
             let provider = provider_with_values("alice-provider", "generic");
 
-            handle_create_provider(
-                &state,
-                create_request_with_principal(provider, &alice),
-            )
-            .await
-            .unwrap();
+            handle_create_provider(&state, create_request_with_principal(provider, &alice))
+                .await
+                .unwrap();
 
-            let err = handle_get_provider(
-                &state,
-                get_request_with_principal("alice-provider", &bob),
-            )
-            .await
-            .unwrap_err();
+            let err =
+                handle_get_provider(&state, get_request_with_principal("alice-provider", &bob))
+                    .await
+                    .unwrap_err();
             assert_eq!(err.code(), Code::PermissionDenied);
         }
 
@@ -4964,20 +4950,18 @@ mod tests {
             let admin = admin_principal();
             let provider = provider_with_values("alice-provider", "generic");
 
-            handle_create_provider(
-                &state,
-                create_request_with_principal(provider, &alice),
-            )
-            .await
-            .unwrap();
+            handle_create_provider(&state, create_request_with_principal(provider, &alice))
+                .await
+                .unwrap();
 
-            let response = handle_get_provider(
-                &state,
-                get_request_with_principal("alice-provider", &admin),
-            )
-            .await
-            .unwrap();
-            assert_eq!(response.into_inner().provider.unwrap().object_name(), "alice-provider");
+            let response =
+                handle_get_provider(&state, get_request_with_principal("alice-provider", &admin))
+                    .await
+                    .unwrap();
+            assert_eq!(
+                response.into_inner().provider.unwrap().object_name(),
+                "alice-provider"
+            );
         }
 
         #[tokio::test]
@@ -4988,21 +4972,15 @@ mod tests {
 
             // Alice creates a provider
             let p1 = provider_with_values("alice-provider", "generic");
-            handle_create_provider(
-                &state,
-                create_request_with_principal(p1, &alice),
-            )
-            .await
-            .unwrap();
+            handle_create_provider(&state, create_request_with_principal(p1, &alice))
+                .await
+                .unwrap();
 
             // Bob creates a provider
             let p2 = provider_with_values("bob-provider", "generic");
-            handle_create_provider(
-                &state,
-                create_request_with_principal(p2, &bob),
-            )
-            .await
-            .unwrap();
+            handle_create_provider(&state, create_request_with_principal(p2, &bob))
+                .await
+                .unwrap();
 
             // Create a shared provider (no principal → no owner label)
             let shared = provider_with_values("shared-provider", "generic");
@@ -5016,14 +4994,11 @@ mod tests {
             .unwrap();
 
             // Alice lists: sees her own + shared, not Bob's
-            let alice_list = handle_list_providers(
-                &state,
-                list_request_with_principal(&alice),
-            )
-            .await
-            .unwrap()
-            .into_inner()
-            .providers;
+            let alice_list = handle_list_providers(&state, list_request_with_principal(&alice))
+                .await
+                .unwrap()
+                .into_inner()
+                .providers;
 
             let alice_names: Vec<&str> = alice_list.iter().map(|p| p.object_name()).collect();
             assert!(alice_names.contains(&"alice-provider"));
@@ -5031,14 +5006,11 @@ mod tests {
             assert!(!alice_names.contains(&"bob-provider"));
 
             // Bob lists: sees his own + shared, not Alice's
-            let bob_list = handle_list_providers(
-                &state,
-                list_request_with_principal(&bob),
-            )
-            .await
-            .unwrap()
-            .into_inner()
-            .providers;
+            let bob_list = handle_list_providers(&state, list_request_with_principal(&bob))
+                .await
+                .unwrap()
+                .into_inner()
+                .providers;
 
             let bob_names: Vec<&str> = bob_list.iter().map(|p| p.object_name()).collect();
             assert!(bob_names.contains(&"bob-provider"));
@@ -5053,12 +5025,9 @@ mod tests {
             let admin = admin_principal();
 
             let p1 = provider_with_values("alice-provider", "generic");
-            handle_create_provider(
-                &state,
-                create_request_with_principal(p1, &alice),
-            )
-            .await
-            .unwrap();
+            handle_create_provider(&state, create_request_with_principal(p1, &alice))
+                .await
+                .unwrap();
 
             let shared = provider_with_values("shared-provider", "generic");
             handle_create_provider(
@@ -5070,14 +5039,11 @@ mod tests {
             .await
             .unwrap();
 
-            let admin_list = handle_list_providers(
-                &state,
-                list_request_with_principal(&admin),
-            )
-            .await
-            .unwrap()
-            .into_inner()
-            .providers;
+            let admin_list = handle_list_providers(&state, list_request_with_principal(&admin))
+                .await
+                .unwrap()
+                .into_inner()
+                .providers;
 
             let names: Vec<&str> = admin_list.iter().map(|p| p.object_name()).collect();
             assert!(names.contains(&"alice-provider"));
@@ -5090,12 +5056,9 @@ mod tests {
             let alice = user_principal("alice-uuid");
             let provider = provider_with_values("alice-provider", "generic");
 
-            handle_create_provider(
-                &state,
-                create_request_with_principal(provider, &alice),
-            )
-            .await
-            .unwrap();
+            handle_create_provider(&state, create_request_with_principal(provider, &alice))
+                .await
+                .unwrap();
 
             let update = Provider {
                 metadata: Some(openshell_core::proto::datamodel::v1::ObjectMeta {
@@ -5113,12 +5076,10 @@ mod tests {
                 credential_expires_at_ms: HashMap::new(),
             };
 
-            let response = handle_update_provider(
-                &state,
-                update_request_with_principal(update, &alice),
-            )
-            .await
-            .unwrap();
+            let response =
+                handle_update_provider(&state, update_request_with_principal(update, &alice))
+                    .await
+                    .unwrap();
 
             let updated = response.into_inner().provider.unwrap();
             assert!(updated.credentials.contains_key("NEW_KEY"));
@@ -5131,12 +5092,9 @@ mod tests {
             let bob = user_principal("bob-uuid");
             let provider = provider_with_values("alice-provider", "generic");
 
-            handle_create_provider(
-                &state,
-                create_request_with_principal(provider, &alice),
-            )
-            .await
-            .unwrap();
+            handle_create_provider(&state, create_request_with_principal(provider, &alice))
+                .await
+                .unwrap();
 
             let update = Provider {
                 metadata: Some(openshell_core::proto::datamodel::v1::ObjectMeta {
@@ -5154,12 +5112,9 @@ mod tests {
                 credential_expires_at_ms: HashMap::new(),
             };
 
-            let err = handle_update_provider(
-                &state,
-                update_request_with_principal(update, &bob),
-            )
-            .await
-            .unwrap_err();
+            let err = handle_update_provider(&state, update_request_with_principal(update, &bob))
+                .await
+                .unwrap_err();
             assert_eq!(err.code(), Code::PermissionDenied);
         }
 
@@ -5169,12 +5124,9 @@ mod tests {
             let alice = user_principal("alice-uuid");
             let provider = provider_with_values("alice-provider", "generic");
 
-            handle_create_provider(
-                &state,
-                create_request_with_principal(provider, &alice),
-            )
-            .await
-            .unwrap();
+            handle_create_provider(&state, create_request_with_principal(provider, &alice))
+                .await
+                .unwrap();
 
             let response = handle_delete_provider(
                 &state,
@@ -5192,12 +5144,9 @@ mod tests {
             let bob = user_principal("bob-uuid");
             let provider = provider_with_values("alice-provider", "generic");
 
-            handle_create_provider(
-                &state,
-                create_request_with_principal(provider, &alice),
-            )
-            .await
-            .unwrap();
+            handle_create_provider(&state, create_request_with_principal(provider, &alice))
+                .await
+                .unwrap();
 
             let err = handle_delete_provider(
                 &state,
@@ -5225,13 +5174,14 @@ mod tests {
             .unwrap();
 
             // Any user can get it
-            let response = handle_get_provider(
-                &state,
-                get_request_with_principal("shared-provider", &bob),
-            )
-            .await
-            .unwrap();
-            assert_eq!(response.into_inner().provider.unwrap().object_name(), "shared-provider");
+            let response =
+                handle_get_provider(&state, get_request_with_principal("shared-provider", &bob))
+                    .await
+                    .unwrap();
+            assert_eq!(
+                response.into_inner().provider.unwrap().object_name(),
+                "shared-provider"
+            );
         }
 
         #[tokio::test]
@@ -5247,12 +5197,10 @@ mod tests {
                 .labels
                 .insert(OWNER_LABEL.to_string(), "spoofed-uuid".to_string());
 
-            let response = handle_create_provider(
-                &state,
-                create_request_with_principal(provider, &alice),
-            )
-            .await
-            .unwrap();
+            let response =
+                handle_create_provider(&state, create_request_with_principal(provider, &alice))
+                    .await
+                    .unwrap();
 
             let created = response.into_inner().provider.unwrap();
             let labels = &created.metadata.as_ref().unwrap().labels;
