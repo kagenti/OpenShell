@@ -162,7 +162,7 @@ async fn handle_create_sandbox_inner(
         .get::<crate::auth::principal::Principal>()
         .cloned();
     let mut request = request.into_inner();
-    let spec = request
+    let mut spec = request
         .spec
         .ok_or_else(|| Status::invalid_argument("spec is required"))?;
 
@@ -206,7 +206,6 @@ async fn handle_create_sandbox_inner(
     validate_provider_environment_keys_unique(state.store.as_ref(), &spec.providers).await?;
 
     // Ensure the template always carries the resolved image.
-    let mut spec = spec;
     let template = spec.template.get_or_insert_with(SandboxTemplate::default);
     if template.image.is_empty() {
         template.image = state.compute.default_image().to_string();
