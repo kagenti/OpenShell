@@ -167,6 +167,109 @@ fn is_valid_label_value(value: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Scoped name helpers
+// ---------------------------------------------------------------------------
+
+/// Separator between owner and object name in scoped DB keys.
+const SCOPE_SEPARATOR: char = '/';
+
+/// Build a scoped DB key: `"{owner}/{name}"`.
+///
+/// The owner segment is the sanitized subject (UUID or hex hash), guaranteed to
+/// contain no `/`. The user-visible name may contain `/` only if we ever allow
+/// it (currently validation rejects it), but the *first* `/` is always the
+/// owner boundary.
+pub fn scoped_name(owner: &str, name: &str) -> String {
+    format!("{owner}{SCOPE_SEPARATOR}{name}")
+}
+
+/// Extract the user-visible name from a potentially scoped DB key.
+///
+/// If the key contains a `/`, the part after the first `/` is the display name.
+/// If no `/`, the key *is* the display name (shared/legacy provider).
+pub fn display_name(db_key: &str) -> &str {
+    match db_key.find(SCOPE_SEPARATOR) {
+        Some(pos) => &db_key[pos + 1..],
+        None => db_key,
+    }
+}
+
+/// Extract the owner prefix from a scoped DB key, if present.
+pub fn owner_prefix(db_key: &str) -> Option<&str> {
+    db_key.find(SCOPE_SEPARATOR).map(|pos| &db_key[..pos])
+}
+
+/// Build the scoped DB key for the given principal, or return the raw name for
+/// anonymous/admin callers.
+pub fn scoped_name_for_principal(
+    name: &str,
+    principal: Option<&Principal>,
+    admin_role: &str,
+) -> Result<String, Status> {
+    let Some(identity) = principal_identity(principal) else {
+        return Ok(name.to_string());
+    };
+
+    if !admin_role.is_empty() && identity.roles.iter().any(|r| r == admin_role) {
+        return Ok(name.to_string());
+    }
+
+    let owner_value = sanitize_subject(&identity.subject)?;
+    Ok(scoped_name(&owner_value, name))
+}
+
+/// Resolve a provider name with owner-scoped fallback.
+///
+/// Resolution order:
+/// 1. Try `{owner}/{name}` (user's own provider)
+/// 2. Fall back to `{name}` (shared provider, no owner prefix)
+///
+/// Admin callers and anonymous principals resolve the raw name directly.
+pub async fn resolve_scoped_name(
+    store: &crate::persistence::Store,
+    object_type: &str,
+    name: &str,
+    principal: Option<&Principal>,
+    admin_role: &str,
+) -> Result<Option<crate::persistence::ObjectRecord>, Status> {
+    let Some(identity) = principal_identity(principal) else {
+        // Anonymous/none → direct lookup (backward compat)
+        return store
+            .get_by_name(object_type, name)
+            .await
+            .map_err(|e| Status::internal(format!("fetch by name failed: {e}")));
+    };
+
+    // Admin with explicit scoped name (contains '/') → direct lookup
+    let is_admin = !admin_role.is_empty() && identity.roles.iter().any(|r| r == admin_role);
+    if is_admin && name.contains(SCOPE_SEPARATOR) {
+        return store
+            .get_by_name(object_type, name)
+            .await
+            .map_err(|e| Status::internal(format!("fetch by name failed: {e}")));
+    }
+
+    // Non-admin (or admin without explicit scope): try owned first
+    if !is_admin {
+        let owner_value = sanitize_subject(&identity.subject)?;
+        let owned_key = scoped_name(&owner_value, name);
+        let owned = store
+            .get_by_name(object_type, &owned_key)
+            .await
+            .map_err(|e| Status::internal(format!("fetch owned provider failed: {e}")))?;
+        if owned.is_some() {
+            return Ok(owned);
+        }
+    }
+
+    // Fall back to shared (unscoped) name
+    store
+        .get_by_name(object_type, name)
+        .await
+        .map_err(|e| Status::internal(format!("fetch shared provider failed: {e}")))
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -369,5 +472,62 @@ mod tests {
     fn owner_selector_none_no_filter() {
         let result = owner_selector(None, "", "openshell-admin").unwrap();
         assert_eq!(result, "");
+    }
+
+    // ---- scoped name helpers ----
+
+    #[test]
+    fn scoped_name_construction() {
+        assert_eq!(scoped_name("alice-uuid-1234", "openai"), "alice-uuid-1234/openai");
+    }
+
+    #[test]
+    fn display_name_strips_owner() {
+        assert_eq!(display_name("alice-uuid-1234/openai"), "openai");
+    }
+
+    #[test]
+    fn display_name_shared_unchanged() {
+        assert_eq!(display_name("openai"), "openai");
+    }
+
+    #[test]
+    fn owner_prefix_extracts_owner() {
+        assert_eq!(owner_prefix("alice-uuid-1234/openai"), Some("alice-uuid-1234"));
+    }
+
+    #[test]
+    fn owner_prefix_none_for_shared() {
+        assert_eq!(owner_prefix("openai"), None);
+    }
+
+    #[test]
+    fn scoped_name_for_principal_user() {
+        let principal = alice();
+        let result =
+            scoped_name_for_principal("openai", Some(&principal), "openshell-admin").unwrap();
+        assert_eq!(result, "alice-uuid-1234/openai");
+    }
+
+    #[test]
+    fn scoped_name_for_principal_admin_unscoped() {
+        let principal = admin_principal();
+        let result =
+            scoped_name_for_principal("openai", Some(&principal), "openshell-admin").unwrap();
+        assert_eq!(result, "openai");
+    }
+
+    #[test]
+    fn scoped_name_for_principal_anonymous_unscoped() {
+        let result =
+            scoped_name_for_principal("openai", Some(&Principal::Anonymous), "openshell-admin")
+                .unwrap();
+        assert_eq!(result, "openai");
+    }
+
+    #[test]
+    fn scoped_name_for_principal_none_unscoped() {
+        let result = scoped_name_for_principal("openai", None, "openshell-admin").unwrap();
+        assert_eq!(result, "openai");
     }
 }

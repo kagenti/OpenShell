@@ -43,7 +43,8 @@ use russh::ChannelMsg;
 use russh::client::AuthResult;
 
 use super::provider::{
-    get_provider_record, is_valid_env_key, validate_provider_environment_keys_unique,
+    get_provider_record_by_db_key, is_valid_env_key, prepare_provider_response,
+    resolve_provider_db_key, validate_provider_environment_keys_unique,
 };
 use super::validation::{
     level_matches, source_matches, validate_exec_request_fields, validate_policy_safety,
@@ -77,6 +78,16 @@ pub(super) fn check_sandbox_owner(
     let empty = std::collections::HashMap::new();
     let labels = sandbox.metadata.as_ref().map_or(&empty, |m| &m.labels);
     crate::auth::ownership::check_owner(labels, principal, admin_role_name(state))
+}
+
+/// Strip owner prefixes from sandbox spec.providers before returning to user.
+fn strip_sandbox_provider_prefixes(mut sandbox: Sandbox) -> Sandbox {
+    if let Some(ref mut spec) = sandbox.spec {
+        for name in &mut spec.providers {
+            *name = crate::auth::ownership::display_name(name).to_string();
+        }
+    }
+    sandbox
 }
 
 // ---------------------------------------------------------------------------
@@ -168,15 +179,26 @@ async fn handle_create_sandbox_inner(
         crate::grpc::validation::validate_label_value(value)?;
     }
 
-    // Validate provider names exist (fail fast).
+    // Resolve provider names to scoped DB keys and validate they exist.
+    // Users pass visible names ("openai"); we store the resolved DB key
+    // ("{owner}/openai" or "openai" for shared) in spec.providers so that
+    // internal lookups are single-pass.
+    let mut resolved_providers = Vec::with_capacity(spec.providers.len());
     for name in &spec.providers {
-        state
-            .store
-            .get_message_by_name::<Provider>(name)
-            .await
-            .map_err(|e| Status::internal(format!("fetch provider failed: {e}")))?
-            .ok_or_else(|| Status::failed_precondition(format!("provider '{name}' not found")))?;
+        let record = crate::auth::ownership::resolve_scoped_name(
+            state.store.as_ref(),
+            Provider::object_type(),
+            name,
+            principal.as_ref(),
+            admin_role,
+        )
+        .await?
+        .ok_or_else(|| Status::failed_precondition(format!("provider '{name}' not found")))?;
+        let provider = Provider::decode(record.payload.as_slice())
+            .map_err(|e| Status::internal(format!("decode provider failed: {e}")))?;
+        resolved_providers.push(provider.object_name().to_string());
     }
+    spec.providers = resolved_providers;
     validate_provider_environment_keys_unique(state.store.as_ref(), &spec.providers).await?;
 
     // Ensure the template always carries the resolved image.
@@ -255,7 +277,7 @@ async fn handle_create_sandbox_inner(
         "CreateSandbox request completed successfully"
     );
     Ok(Response::new(SandboxResponse {
-        sandbox: Some(sandbox),
+        sandbox: Some(strip_sandbox_provider_prefixes(sandbox)),
     }))
 }
 
@@ -281,7 +303,7 @@ pub(super) async fn handle_get_sandbox(
     let sandbox = sandbox.ok_or_else(|| Status::not_found("sandbox not found"))?;
     check_sandbox_owner(&sandbox, principal.as_ref(), state)?;
     Ok(Response::new(SandboxResponse {
-        sandbox: Some(sandbox),
+        sandbox: Some(strip_sandbox_provider_prefixes(sandbox)),
     }))
 }
 
@@ -319,6 +341,10 @@ pub(super) async fn handle_list_sandboxes(
             .map_err(|e| Status::internal(format!("list sandboxes with selector failed: {e}")))?
     };
 
+    let sandboxes = sandboxes
+        .into_iter()
+        .map(strip_sandbox_provider_prefixes)
+        .collect();
     Ok(Response::new(ListSandboxesResponse { sandboxes }))
 }
 
@@ -359,32 +385,23 @@ pub(super) async fn handle_attach_sandbox_provider(
         )));
     }
 
-    let provider = get_provider_record(state.store.as_ref(), &request.provider_name)
-        .await
-        .map_err(|err| {
-            if err.code() == tonic::Code::NotFound {
-                Status::failed_precondition(format!(
-                    "provider '{}' not found",
-                    request.provider_name
-                ))
-            } else {
-                err
-            }
-        })?;
-
-    // Verify the caller can use this provider (must be own or shared).
-    let empty = std::collections::HashMap::new();
-    let provider_labels = provider.metadata.as_ref().map_or(&empty, |m| &m.labels);
-    crate::auth::ownership::check_owner(
-        provider_labels,
+    // Resolve user-visible name to DB key for storage in spec.providers.
+    let provider_db_key = resolve_provider_db_key(
+        state.store.as_ref(),
+        &request.provider_name,
         principal.as_ref(),
         admin_role_name(state),
     )
-    .map_err(|_| {
-        Status::permission_denied(format!(
-            "provider '{}' is owned by another user",
-            request.provider_name
-        ))
+    .await
+    .map_err(|err| {
+        if err.code() == tonic::Code::NotFound {
+            Status::failed_precondition(format!(
+                "provider '{}' not found",
+                request.provider_name
+            ))
+        } else {
+            err
+        }
     })?;
 
     let _sandbox_sync_guard = state.compute.sandbox_sync_guard().await;
@@ -409,7 +426,7 @@ pub(super) async fn handle_attach_sandbox_provider(
         && !spec
             .providers
             .iter()
-            .any(|name| name == &request.provider_name)
+            .any(|name| name == &provider_db_key)
     {
         return Err(Status::invalid_argument(format!(
             "providers list exceeds maximum ({MAX_PROVIDERS})"
@@ -420,15 +437,15 @@ pub(super) async fn handle_attach_sandbox_provider(
     if !candidate_spec
         .providers
         .iter()
-        .any(|name| name == &request.provider_name)
+        .any(|name| name == &provider_db_key)
     {
-        candidate_spec.providers.push(request.provider_name.clone());
+        candidate_spec.providers.push(provider_db_key.clone());
     }
     validate_sandbox_spec(&request.sandbox_name, &candidate_spec)?;
     validate_provider_environment_keys_unique(state.store.as_ref(), &candidate_spec.providers)
         .await?;
 
-    let provider_name = request.provider_name.clone();
+    let provider_name_for_cas = provider_db_key.clone();
     let attached = Arc::new(AtomicBool::new(false));
     let attached_clone = attached.clone();
 
@@ -444,10 +461,10 @@ pub(super) async fn handle_attach_sandbox_provider(
                 };
 
                 dedupe_provider_names(&mut spec.providers);
-                if !spec.providers.iter().any(|name| name == &provider_name)
+                if !spec.providers.iter().any(|name| name == &provider_name_for_cas)
                     && spec.providers.len() < MAX_PROVIDERS
                 {
-                    spec.providers.push(provider_name.clone());
+                    spec.providers.push(provider_name_for_cas.clone());
                     attached_clone.store(true, Ordering::Relaxed);
                 }
             },
@@ -465,7 +482,7 @@ pub(super) async fn handle_attach_sandbox_provider(
     );
 
     Ok(Response::new(AttachSandboxProviderResponse {
-        sandbox: Some(sandbox),
+        sandbox: Some(strip_sandbox_provider_prefixes(sandbox)),
         attached,
     }))
 }
@@ -492,6 +509,15 @@ pub(super) async fn handle_detach_sandbox_provider(
         )));
     }
 
+    // Resolve user-visible name to DB key (spec stores DB keys)
+    let provider_db_key = resolve_provider_db_key(
+        state.store.as_ref(),
+        &request.provider_name,
+        principal.as_ref(),
+        &admin_role_name(state),
+    )
+    .await?;
+
     let _sandbox_sync_guard = state.compute.sandbox_sync_guard().await;
     let sandbox = sandbox_by_name(state, &request.sandbox_name).await?;
     check_sandbox_owner(&sandbox, principal.as_ref(), state)?;
@@ -508,7 +534,7 @@ pub(super) async fn handle_detach_sandbox_provider(
         .as_ref()
         .ok_or_else(|| Status::internal("sandbox spec is missing"))?;
 
-    let provider_name = request.provider_name.clone();
+    let provider_name_for_cas = provider_db_key.clone();
     let detached = Arc::new(AtomicBool::new(false));
     let detached_clone = detached.clone();
 
@@ -524,7 +550,7 @@ pub(super) async fn handle_detach_sandbox_provider(
                 };
 
                 let before_len = spec.providers.len();
-                spec.providers.retain(|name| name != &provider_name);
+                spec.providers.retain(|name| name != &provider_name_for_cas);
                 if spec.providers.len() != before_len {
                     detached_clone.store(true, Ordering::Relaxed);
                     // Only dedupe after making a change
@@ -545,7 +571,7 @@ pub(super) async fn handle_detach_sandbox_provider(
     );
 
     Ok(Response::new(DetachSandboxProviderResponse {
-        sandbox: Some(sandbox),
+        sandbox: Some(strip_sandbox_provider_prefixes(sandbox)),
         detached,
     }))
 }
@@ -617,24 +643,25 @@ async fn providers_for_sandbox(
     state: &Arc<ServerState>,
     sandbox: &Sandbox,
 ) -> Result<Vec<Provider>, Status> {
-    let provider_names = sandbox
+    let provider_db_keys = sandbox
         .spec
         .as_ref()
         .map(|spec| spec.providers.as_slice())
         .ok_or_else(|| Status::failed_precondition("sandbox spec is missing"))?;
 
-    let mut providers = Vec::with_capacity(provider_names.len());
-    for name in provider_names {
-        let provider = get_provider_record(state.store.as_ref(), name)
+    let mut providers = Vec::with_capacity(provider_db_keys.len());
+    for db_key in provider_db_keys {
+        let provider = get_provider_record_by_db_key(state.store.as_ref(), db_key)
             .await
             .map_err(|err| {
                 if err.code() == tonic::Code::NotFound {
-                    Status::failed_precondition(format!("provider '{name}' not found"))
+                    let display = crate::auth::ownership::display_name(db_key);
+                    Status::failed_precondition(format!("provider '{display}' not found"))
                 } else {
                     err
                 }
             })?;
-        providers.push(provider);
+        providers.push(prepare_provider_response(provider));
     }
     Ok(providers)
 }
@@ -742,7 +769,7 @@ pub(super) async fn handle_watch_sandbox(
                     .send(Ok(SandboxStreamEvent {
                         payload: Some(
                             openshell_core::proto::sandbox_stream_event::Payload::Sandbox(
-                                sandbox.clone(),
+                                strip_sandbox_provider_prefixes(sandbox.clone()),
                             ),
                         ),
                     }))
@@ -816,7 +843,7 @@ pub(super) async fn handle_watch_sandbox(
                             match state.store.get_message::<Sandbox>(&sandbox_id).await {
                                 Ok(Some(sandbox)) => {
                                     state.sandbox_index.update_from_sandbox(&sandbox);
-                                    if tx.send(Ok(SandboxStreamEvent { payload: Some(openshell_core::proto::sandbox_stream_event::Payload::Sandbox(sandbox.clone()))})).await.is_err() {
+                                    if tx.send(Ok(SandboxStreamEvent { payload: Some(openshell_core::proto::sandbox_stream_event::Payload::Sandbox(strip_sandbox_provider_prefixes(sandbox.clone())))})).await.is_err() {
                                         return;
                                     }
                                     if stop_on_terminal {
