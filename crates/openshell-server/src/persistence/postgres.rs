@@ -323,6 +323,30 @@ WHERE object_type = $1 AND name = $2
         Ok(row.map(row_to_object_record))
     }
 
+    pub async fn find_by_name_suffix(
+        &self,
+        object_type: &str,
+        suffix: &str,
+    ) -> PersistenceResult<Vec<ObjectRecord>> {
+        let escaped = suffix.replace('%', r"\%").replace('_', r"\_");
+        let pattern = format!("%/{escaped}");
+        let rows = sqlx::query(
+            r"
+SELECT object_type, id, name, payload, created_at_ms, updated_at_ms, labels, resource_version
+FROM objects
+WHERE object_type = $1 AND name LIKE $2 ESCAPE '\'
+ORDER BY created_at_ms ASC
+",
+        )
+        .bind(object_type)
+        .bind(&pattern)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| map_db_error(&e))?;
+
+        Ok(rows.into_iter().map(row_to_object_record).collect())
+    }
+
     pub async fn delete(&self, object_type: &str, id: &str) -> PersistenceResult<bool> {
         let result = sqlx::query("DELETE FROM objects WHERE object_type = $1 AND id = $2")
             .bind(object_type)

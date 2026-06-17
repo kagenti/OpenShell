@@ -222,10 +222,15 @@ pub fn scoped_name_for_principal(
 /// Resolve a provider name with owner-scoped fallback.
 ///
 /// Resolution order:
-/// 1. Try `{owner}/{name}` (user's own provider)
-/// 2. Fall back to `{name}` (shared provider, no owner prefix)
+/// 1. Try `{owner}/{name}` (user's own provider) — non-admin only
+/// 2. Fall back to `{name}` (shared/legacy provider, no owner prefix)
+///    - If found and owned by another user: PermissionDenied (non-admin)
+/// 3. Suffix scan for `*/{name}` (cross-user detection)
+///    - If found and admin: return the match
+///    - If found and non-admin: PermissionDenied
 ///
-/// Admin callers and anonymous principals resolve the raw name directly.
+/// Admin callers with explicit scoped name (contains '/') resolve directly.
+/// Anonymous principals resolve the raw name directly (backward compat).
 pub async fn resolve_scoped_name(
     store: &crate::persistence::Store,
     object_type: &str,
@@ -250,10 +255,11 @@ pub async fn resolve_scoped_name(
             .map_err(|e| Status::internal(format!("fetch by name failed: {e}")));
     }
 
-    // Non-admin (or admin without explicit scope): try owned first
+    let caller_owner = sanitize_subject(&identity.subject)?;
+
+    // Step 1: Non-admin tries owned lookup first
     if !is_admin {
-        let owner_value = sanitize_subject(&identity.subject)?;
-        let owned_key = scoped_name(&owner_value, name);
+        let owned_key = scoped_name(&caller_owner, name);
         let owned = store
             .get_by_name(object_type, &owned_key)
             .await
@@ -263,11 +269,43 @@ pub async fn resolve_scoped_name(
         }
     }
 
-    // Fall back to shared (unscoped) name
-    store
+    // Step 2: Fall back to shared (unscoped) name
+    let shared = store
         .get_by_name(object_type, name)
         .await
-        .map_err(|e| Status::internal(format!("fetch shared provider failed: {e}")))
+        .map_err(|e| Status::internal(format!("fetch shared provider failed: {e}")))?;
+
+    if let Some(ref record) = shared {
+        if let Some(ref labels_json) = record.labels {
+            let labels: HashMap<String, String> =
+                serde_json::from_str(labels_json).unwrap_or_default();
+            if let Some(record_owner) = labels.get(OWNER_LABEL) {
+                if *record_owner != caller_owner && !is_admin {
+                    return Err(Status::permission_denied(
+                        "provider is owned by another user",
+                    ));
+                }
+            }
+        }
+        return Ok(shared);
+    }
+
+    // Step 3: Both missed — suffix scan for cross-user detection
+    let candidates = store
+        .find_by_name_suffix(object_type, name)
+        .await
+        .map_err(|e| Status::internal(format!("suffix search failed: {e}")))?;
+
+    if let Some(record) = candidates.into_iter().next() {
+        if is_admin {
+            return Ok(Some(record));
+        }
+        return Err(Status::permission_denied(
+            "provider is owned by another user",
+        ));
+    }
+
+    Ok(None)
 }
 
 // ---------------------------------------------------------------------------
