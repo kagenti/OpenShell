@@ -212,6 +212,10 @@ pub(super) async fn list_provider_records(
 
 /// List providers visible to the given principal: own providers + shared (no owner).
 /// Admins and anonymous principals see all providers (backward compat).
+///
+/// For non-admin users, filters happen post-fetch since the store selector
+/// cannot express "owner=X OR no owner label". To maintain correct page sizes
+/// we loop in batches until `limit` visible results are accumulated.
 async fn list_provider_records_for_principal(
     state: &Arc<ServerState>,
     principal: Option<&crate::auth::principal::Principal>,
@@ -234,22 +238,42 @@ async fn list_provider_records_for_principal(
         _ => None, // Anonymous/sandbox/none → see all (backward compat)
     };
 
-    let all_providers = list_provider_records(state.store.as_ref(), limit, offset).await?;
-
     let Some(owner_value) = caller_owner else {
-        return Ok(all_providers);
+        return list_provider_records(state.store.as_ref(), limit, offset).await;
     };
 
-    Ok(all_providers
-        .into_iter()
-        .filter(|provider| {
+    // Non-admin path: loop in batches to guarantee `limit` visible results
+    // despite post-fetch filtering. The store selector cannot express
+    // "owner=X OR no owner label", so we filter here.
+    let limit_usize = limit as usize;
+    let mut visible = Vec::new();
+    let mut current_offset = offset;
+    let batch_size = limit.max(50); // fetch at least 50 to reduce round-trips
+
+    loop {
+        let batch = list_provider_records(state.store.as_ref(), batch_size, current_offset).await?;
+        let exhausted = batch.len() < batch_size as usize;
+
+        for provider in batch {
             let labels = provider.metadata.as_ref().map(|m| &m.labels);
-            match labels.and_then(|l| l.get(OWNER_LABEL)) {
-                None => true,                 // Shared provider (no owner) → visible
-                Some(v) => *v == owner_value, // Owned → visible only if caller's
+            if labels
+                .and_then(|l| l.get(OWNER_LABEL))
+                .is_none_or(|v| *v == owner_value)
+            {
+                visible.push(provider);
+                if visible.len() >= limit_usize {
+                    return Ok(visible);
+                }
             }
-        })
-        .collect())
+        }
+
+        if exhausted {
+            break;
+        }
+        current_offset += batch_size;
+    }
+
+    Ok(visible)
 }
 
 pub(super) async fn update_provider_record(
@@ -1295,9 +1319,12 @@ pub(super) async fn handle_update_provider(
             .get_message_by_name::<Provider>(provider_name)
             .await
             .map_err(|e| Status::internal(format!("fetch provider failed: {e}")))?;
-        if let Some(ref existing) = existing {
-            check_provider_owner(existing, principal.as_ref(), state)?;
-        }
+        let Some(ref existing) = existing else {
+            return Err(Status::not_found(format!(
+                "provider '{provider_name}' not found"
+            )));
+        };
+        check_provider_owner(existing, principal.as_ref(), state)?;
     }
 
     provider
@@ -1699,9 +1726,10 @@ pub(super) async fn handle_delete_provider(
         .get_message_by_name::<Provider>(&name)
         .await
         .map_err(|e| Status::internal(format!("fetch provider failed: {e}")))?;
-    if let Some(ref existing) = existing {
-        check_provider_owner(existing, principal.as_ref(), state)?;
-    }
+    let Some(ref existing) = existing else {
+        return Err(Status::not_found(format!("provider '{name}' not found")));
+    };
+    check_provider_owner(existing, principal.as_ref(), state)?;
 
     let provider_profile = provider_profile_for_name(state.store.as_ref(), &name).await;
     let result = delete_provider_record(state.store.as_ref(), &name).await;
@@ -4770,6 +4798,8 @@ mod tests {
 
     mod ownership_tests {
         use super::*;
+        use std::sync::Arc;
+
         use crate::auth::identity::{Identity, IdentityProvider};
         use crate::auth::ownership::OWNER_LABEL;
         use crate::auth::principal::{Principal, UserPrincipal};
@@ -4780,8 +4810,8 @@ mod tests {
         use crate::tracing_bus::TracingLogBus;
         use openshell_core::OidcConfig;
 
-        async fn oidc_test_state() -> std::sync::Arc<ServerState> {
-            let store = std::sync::Arc::new(
+        async fn oidc_test_state() -> Arc<ServerState> {
+            let store = Arc::new(
                 Store::connect("sqlite::memory:?cache=shared")
                     .await
                     .unwrap(),
@@ -4798,14 +4828,14 @@ mod tests {
                     user_role: "openshell-user".to_string(),
                     scopes_claim: String::new(),
                 });
-            std::sync::Arc::new(ServerState::new(
+            Arc::new(ServerState::new(
                 config,
                 store,
                 compute,
                 SandboxIndex::new(),
                 SandboxWatchBus::new(),
                 TracingLogBus::new(),
-                std::sync::Arc::new(crate::supervisor_session::SupervisorSessionRegistry::new()),
+                Arc::new(crate::supervisor_session::SupervisorSessionRegistry::new()),
                 None,
                 None,
             ))
@@ -5000,7 +5030,7 @@ mod tests {
                 .into_inner()
                 .providers;
 
-            let alice_names: Vec<&str> = alice_list.iter().map(|p| p.object_name()).collect();
+            let alice_names: Vec<&str> = alice_list.iter().map(Provider::object_name).collect();
             assert!(alice_names.contains(&"alice-provider"));
             assert!(alice_names.contains(&"shared-provider"));
             assert!(!alice_names.contains(&"bob-provider"));
@@ -5012,7 +5042,7 @@ mod tests {
                 .into_inner()
                 .providers;
 
-            let bob_names: Vec<&str> = bob_list.iter().map(|p| p.object_name()).collect();
+            let bob_names: Vec<&str> = bob_list.iter().map(Provider::object_name).collect();
             assert!(bob_names.contains(&"bob-provider"));
             assert!(bob_names.contains(&"shared-provider"));
             assert!(!bob_names.contains(&"alice-provider"));
@@ -5045,7 +5075,7 @@ mod tests {
                 .into_inner()
                 .providers;
 
-            let names: Vec<&str> = admin_list.iter().map(|p| p.object_name()).collect();
+            let names: Vec<&str> = admin_list.iter().map(Provider::object_name).collect();
             assert!(names.contains(&"alice-provider"));
             assert!(names.contains(&"shared-provider"));
         }
@@ -5069,9 +5099,7 @@ mod tests {
                     resource_version: 0,
                 }),
                 r#type: String::new(),
-                credentials: [("NEW_KEY".to_string(), "new-val".to_string())]
-                    .into_iter()
-                    .collect(),
+                credentials: HashMap::from([("NEW_KEY".to_string(), "new-val".to_string())]),
                 config: HashMap::new(),
                 credential_expires_at_ms: HashMap::new(),
             };
@@ -5105,9 +5133,7 @@ mod tests {
                     resource_version: 0,
                 }),
                 r#type: String::new(),
-                credentials: [("STOLEN".to_string(), "val".to_string())]
-                    .into_iter()
-                    .collect(),
+                credentials: HashMap::from([("STOLEN".to_string(), "val".to_string())]),
                 config: HashMap::new(),
                 credential_expires_at_ms: HashMap::new(),
             };
