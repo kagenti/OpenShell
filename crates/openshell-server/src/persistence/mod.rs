@@ -302,6 +302,18 @@ impl Store {
         }
     }
 
+    /// Find objects whose name ends with `/{suffix}` (scoped name lookup).
+    pub async fn find_by_name_suffix(
+        &self,
+        object_type: &str,
+        suffix: &str,
+    ) -> PersistenceResult<Vec<ObjectRecord>> {
+        match self {
+            Self::Postgres(store) => store.find_by_name_suffix(object_type, suffix).await,
+            Self::Sqlite(store) => store.find_by_name_suffix(object_type, suffix).await,
+        }
+    }
+
     /// Delete an object by id.
     pub async fn delete(&self, object_type: &str, id: &str) -> PersistenceResult<bool> {
         match self {

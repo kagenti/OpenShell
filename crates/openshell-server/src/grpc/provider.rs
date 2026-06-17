@@ -5,6 +5,8 @@
 
 #![allow(clippy::result_large_err)] // gRPC handlers return Result<Response<_>, Status>
 
+use std::sync::Arc;
+
 use crate::persistence::{
     ObjectId, ObjectLabels, ObjectName, ObjectType, Store, WriteCondition, generate_name,
 };
@@ -48,6 +50,28 @@ fn check_provider_owner(
     crate::auth::ownership::check_owner(labels, principal, admin_role_name(state))
 }
 
+/// Resolve a provider by user-visible name, decode it, and verify ownership.
+/// Returns the full Provider (with scoped DB name in metadata.name).
+async fn resolve_and_check_provider(
+    state: &Arc<ServerState>,
+    user_name: &str,
+    principal: Option<&crate::auth::principal::Principal>,
+) -> Result<Provider, Status> {
+    let record = crate::auth::ownership::resolve_scoped_name(
+        state.store.as_ref(),
+        Provider::object_type(),
+        user_name,
+        principal,
+        admin_role_name(state),
+    )
+    .await?
+    .ok_or_else(|| Status::not_found("provider not found"))?;
+    let provider = Provider::decode(record.payload.as_slice())
+        .map_err(|e| Status::internal(format!("decode provider failed: {e}")))?;
+    check_provider_owner(&provider, principal, state)?;
+    Ok(provider)
+}
+
 // ---------------------------------------------------------------------------
 // CRUD helpers
 // ---------------------------------------------------------------------------
@@ -61,6 +85,23 @@ fn redact_provider_credentials(mut provider: Provider) -> Provider {
         *value = "REDACTED".to_string();
     }
     provider
+}
+
+/// Strip the owner prefix from a provider's metadata.name for display.
+/// DB stores `{owner}/{name}` but users see just `{name}`.
+///
+/// TODO: preserve scoped keys for admin principals so they can distinguish
+/// between multiple users' identically-named providers.
+fn strip_name_prefix(mut provider: Provider) -> Provider {
+    if let Some(metadata) = provider.metadata.as_mut() {
+        metadata.name = crate::auth::ownership::display_name(&metadata.name).to_string();
+    }
+    provider
+}
+
+/// Prepare a provider for gRPC response: redact credentials and strip name prefix.
+pub(super) fn prepare_provider_response(provider: Provider) -> Provider {
+    strip_name_prefix(redact_provider_credentials(provider))
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -90,6 +131,7 @@ pub(super) async fn create_provider_record(
     store: &Store,
     mut provider: Provider,
 ) -> Result<Provider, Status> {
+    use crate::auth::ownership::{OWNER_LABEL, scoped_name};
     use crate::persistence::{ObjectName, current_time_ms};
 
     // Initialize metadata if not present
@@ -130,6 +172,14 @@ pub(super) async fn create_provider_record(
 
     // Validate field sizes before any I/O.
     validate_provider_fields(&provider)?;
+
+    // Scope the DB name: if the provider has an owner label, prefix the name
+    // with `{owner}/` so two users can have the same user-visible name.
+    if let Some(metadata) = provider.metadata.as_mut()
+        && let Some(owner) = metadata.labels.get(OWNER_LABEL).cloned()
+    {
+        metadata.name = scoped_name(&owner, &metadata.name);
+    }
 
     // Generate UUID for database row and update metadata.id to match
     let provider_id = uuid::Uuid::new_v4().to_string();
@@ -178,20 +228,88 @@ pub(super) async fn create_provider_record(
         metadata.resource_version = result.resource_version;
     }
 
-    Ok(redact_provider_credentials(provider))
+    Ok(prepare_provider_response(provider))
 }
 
-pub(super) async fn get_provider_record(store: &Store, name: &str) -> Result<Provider, Status> {
+/// Resolve a provider by name with owner-scoped lookup.
+///
+/// Resolution order for authenticated non-admin users:
+/// 1. `{owner}/{name}` — user's own provider
+/// 2. `{name}` — shared provider (no owner prefix)
+///
+/// Admin and anonymous callers resolve the raw name directly.
+pub(super) async fn get_provider_record(
+    store: &Store,
+    name: &str,
+    principal: Option<&crate::auth::principal::Principal>,
+    admin_role: &str,
+) -> Result<Provider, Status> {
     if name.is_empty() {
         return Err(Status::invalid_argument("name is required"));
     }
 
+    let record = crate::auth::ownership::resolve_scoped_name(
+        store,
+        Provider::object_type(),
+        name,
+        principal,
+        admin_role,
+    )
+    .await?
+    .ok_or_else(|| Status::not_found("provider not found"))?;
+
+    let provider = Provider::decode(record.payload.as_slice())
+        .map_err(|e| Status::internal(format!("decode provider failed: {e}")))?;
+
+    Ok(prepare_provider_response(provider))
+}
+
+/// Internal lookup by exact DB key (scoped or unscoped). Used by sandbox env
+/// resolution and inference routing where the stored key is already correct.
+///
+/// # Safety (credential exposure)
+///
+/// Returns the provider with UN-redacted credentials. Callers MUST wrap with
+/// `prepare_provider_response` (or at minimum `redact_provider_credentials`)
+/// before returning to users over gRPC.
+pub(super) async fn get_provider_record_by_db_key(
+    store: &Store,
+    db_key: &str,
+) -> Result<Provider, Status> {
+    if db_key.is_empty() {
+        return Err(Status::invalid_argument("name is required"));
+    }
+
     store
-        .get_message_by_name::<Provider>(name)
+        .get_message_by_name::<Provider>(db_key)
         .await
         .map_err(|e| Status::internal(format!("fetch provider failed: {e}")))?
         .ok_or_else(|| Status::not_found("provider not found"))
-        .map(redact_provider_credentials)
+}
+
+/// Resolve a user-visible provider name to the DB key (scoped name).
+/// Returns the DB key that should be stored in sandbox spec.providers.
+pub(super) async fn resolve_provider_db_key(
+    store: &Store,
+    user_name: &str,
+    principal: Option<&crate::auth::principal::Principal>,
+    admin_role: &str,
+) -> Result<String, Status> {
+    if user_name.is_empty() {
+        return Err(Status::invalid_argument("name is required"));
+    }
+
+    let record = crate::auth::ownership::resolve_scoped_name(
+        store,
+        Provider::object_type(),
+        user_name,
+        principal,
+        admin_role,
+    )
+    .await?
+    .ok_or_else(|| Status::not_found(format!("provider '{user_name}' not found")))?;
+
+    Ok(record.name)
 }
 
 pub(super) async fn list_provider_records(
@@ -206,7 +324,7 @@ pub(super) async fn list_provider_records(
 
     Ok(providers
         .into_iter()
-        .map(redact_provider_credentials)
+        .map(prepare_provider_response)
         .collect())
 }
 
@@ -376,7 +494,7 @@ pub(super) async fn update_provider_record(
         metadata.resource_version = result.resource_version;
     }
 
-    Ok(redact_provider_credentials(candidate))
+    Ok(prepare_provider_response(candidate))
 }
 
 pub(super) async fn delete_provider_record(store: &Store, name: &str) -> Result<bool, Status> {
@@ -812,7 +930,6 @@ use openshell_providers::{
     CredentialRefreshProfile, ProfileValidationDiagnostic, ProviderTypeProfile, default_profiles,
     get_default_profile, normalize_profile_id, normalize_provider_type, validate_profile_set,
 };
-use std::sync::Arc;
 use tonic::{Request, Response};
 
 pub(super) async fn handle_create_provider(
@@ -883,8 +1000,13 @@ pub(super) async fn handle_get_provider(
         .get::<crate::auth::principal::Principal>()
         .cloned();
     let name = request.into_inner().name;
-    let provider = get_provider_record(state.store.as_ref(), &name).await?;
-    check_provider_owner(&provider, principal.as_ref(), state)?;
+    let provider = get_provider_record(
+        state.store.as_ref(),
+        &name,
+        principal.as_ref(),
+        admin_role_name(state),
+    )
+    .await?;
 
     Ok(Response::new(ProviderResponse {
         provider: Some(provider),
@@ -1311,20 +1433,27 @@ pub(super) async fn handle_update_provider(
     };
     let provider_type = provider.r#type.clone();
 
-    // Ownership check: verify caller owns the existing provider before allowing update.
-    let provider_name = provider.metadata.as_ref().map_or("", |m| m.name.as_str());
-    if !provider_name.is_empty() {
-        let existing = state
-            .store
-            .get_message_by_name::<Provider>(provider_name)
+    // Ownership check: resolve scoped name and verify caller owns the provider.
+    let user_visible_name = provider.metadata.as_ref().map_or("", |m| m.name.as_str());
+    if !user_visible_name.is_empty() {
+        let existing = resolve_and_check_provider(state, user_visible_name, principal.as_ref())
             .await
-            .map_err(|e| Status::internal(format!("fetch provider failed: {e}")))?;
-        let Some(ref existing) = existing else {
-            return Err(Status::not_found(format!(
-                "provider '{provider_name}' not found"
-            )));
-        };
-        check_provider_owner(existing, principal.as_ref(), state)?;
+            .map_err(|e| {
+                if e.code() == tonic::Code::NotFound {
+                    Status::not_found(format!("provider '{user_visible_name}' not found"))
+                } else {
+                    e
+                }
+            })?;
+
+        // Rewrite the request's name to the resolved DB key so
+        // update_provider_record finds the correct record.
+        if let Some(metadata) = provider.metadata.as_mut() {
+            metadata.name = existing
+                .metadata
+                .as_ref()
+                .map_or_else(String::new, |m| m.name.clone());
+        }
     }
 
     provider
@@ -1365,13 +1494,8 @@ pub(super) async fn handle_get_provider_refresh_status(
     if request.provider.trim().is_empty() {
         return Err(Status::invalid_argument("provider is required"));
     }
-    let provider = state
-        .store
-        .get_message_by_name::<Provider>(&request.provider)
-        .await
-        .map_err(|e| Status::internal(format!("fetch provider failed: {e}")))?
-        .ok_or_else(|| Status::not_found("provider not found"))?;
-    check_provider_owner(&provider, principal.as_ref(), state)?;
+    let provider =
+        resolve_and_check_provider(state, request.provider.trim(), principal.as_ref()).await?;
 
     let states = if request.credential_key.trim().is_empty() {
         crate::provider_refresh::list_refresh_states_for_provider(
@@ -1487,13 +1611,7 @@ pub(super) async fn handle_configure_provider_refresh(
         ));
     }
 
-    let provider = state
-        .store
-        .get_message_by_name::<Provider>(provider_name)
-        .await
-        .map_err(|e| Status::internal(format!("fetch provider failed: {e}")))?
-        .ok_or_else(|| Status::not_found("provider not found"))?;
-    check_provider_owner(&provider, principal.as_ref(), state)?;
+    let provider = resolve_and_check_provider(state, provider_name, principal.as_ref()).await?;
     validate_provider_credential_key_available_for_attached_sandboxes(
         state.store.as_ref(),
         &provider,
@@ -1618,16 +1736,12 @@ pub(super) async fn handle_rotate_provider_credential(
     if credential_key.is_empty() {
         return Err(Status::invalid_argument("credential_key is required"));
     }
-    let provider = state
-        .store
-        .get_message_by_name::<Provider>(provider_name)
-        .await
-        .map_err(|e| Status::internal(format!("fetch provider failed: {e}")))?
-        .ok_or_else(|| Status::not_found("provider not found"))?;
-    check_provider_owner(&provider, principal.as_ref(), state)?;
+    let provider = resolve_and_check_provider(state, provider_name, principal.as_ref()).await?;
+    // Use the resolved DB key for internal refresh operations.
+    let db_key = provider.metadata.as_ref().map_or("", |m| m.name.as_str());
     let refresh_state = crate::provider_refresh::refresh_provider_credential(
         state.store.as_ref(),
-        provider_name,
+        db_key,
         credential_key,
     )
     .await?;
@@ -1656,13 +1770,7 @@ pub(super) async fn handle_delete_provider_refresh(
     if credential_key.is_empty() {
         return Err(Status::invalid_argument("credential_key is required"));
     }
-    let provider = state
-        .store
-        .get_message_by_name::<Provider>(provider_name)
-        .await
-        .map_err(|e| Status::internal(format!("fetch provider failed: {e}")))?
-        .ok_or_else(|| Status::not_found("provider not found"))?;
-    check_provider_owner(&provider, principal.as_ref(), state)?;
+    let provider = resolve_and_check_provider(state, provider_name, principal.as_ref()).await?;
     let existing_refresh_state = crate::provider_refresh::get_refresh_state(
         state.store.as_ref(),
         provider.object_id(),
@@ -1720,19 +1828,21 @@ pub(super) async fn handle_delete_provider(
         .cloned();
     let name = request.into_inner().name;
 
-    // Ownership check: verify caller owns the provider before allowing delete.
-    let existing = state
-        .store
-        .get_message_by_name::<Provider>(&name)
+    // Resolve scoped name and ownership check.
+    let existing = resolve_and_check_provider(state, &name, principal.as_ref())
         .await
-        .map_err(|e| Status::internal(format!("fetch provider failed: {e}")))?;
-    let Some(ref existing) = existing else {
-        return Err(Status::not_found(format!("provider '{name}' not found")));
-    };
-    check_provider_owner(existing, principal.as_ref(), state)?;
+        .map_err(|e| {
+            if e.code() == tonic::Code::NotFound {
+                Status::not_found(format!("provider '{name}' not found"))
+            } else {
+                e
+            }
+        })?;
 
-    let provider_profile = provider_profile_for_name(state.store.as_ref(), &name).await;
-    let result = delete_provider_record(state.store.as_ref(), &name).await;
+    // Use the resolved DB key (scoped name) for deletion.
+    let db_key = existing.metadata.as_ref().map_or("", |m| m.name.as_str());
+    let provider_profile = provider_profile_for_name(state.store.as_ref(), db_key).await;
+    let result = delete_provider_record(state.store.as_ref(), db_key).await;
     match result {
         Ok(deleted) => {
             let outcome = TelemetryOutcome::from_success(deleted);
@@ -3105,7 +3215,9 @@ mod tests {
         let duplicate_err = create_provider_record(&store, created).await.unwrap_err();
         assert_eq!(duplicate_err.code(), Code::AlreadyExists);
 
-        let loaded = get_provider_record(&store, "gitlab-local").await.unwrap();
+        let loaded = get_provider_record(&store, "gitlab-local", None, "")
+            .await
+            .unwrap();
         assert_eq!(loaded.object_id(), provider_id);
 
         let listed = list_provider_records(&store, 100, 0).await.unwrap();
@@ -3175,7 +3287,7 @@ mod tests {
             .unwrap();
         assert!(!deleted_again);
 
-        let missing = get_provider_record(&store, "gitlab-local")
+        let missing = get_provider_record(&store, "gitlab-local", None, "")
             .await
             .unwrap_err();
         assert_eq!(missing.code(), Code::NotFound);
@@ -3544,7 +3656,7 @@ mod tests {
         .unwrap();
         assert!(vertex_empty.credentials.is_empty());
 
-        let get_err = get_provider_record(store, "").await.unwrap_err();
+        let get_err = get_provider_record(store, "", None, "").await.unwrap_err();
         assert_eq!(get_err.code(), Code::InvalidArgument);
 
         let delete_err = delete_provider_record(store, "").await.unwrap_err();
@@ -4966,11 +5078,12 @@ mod tests {
                 .await
                 .unwrap();
 
+            // Information-hiding: non-owner sees NotFound, not PermissionDenied
             let err =
                 handle_get_provider(&state, get_request_with_principal("alice-provider", &bob))
                     .await
                     .unwrap_err();
-            assert_eq!(err.code(), Code::PermissionDenied);
+            assert_eq!(err.code(), Code::NotFound);
         }
 
         #[tokio::test]
@@ -5138,10 +5251,11 @@ mod tests {
                 credential_expires_at_ms: HashMap::new(),
             };
 
+            // Information-hiding: non-owner sees NotFound, not PermissionDenied
             let err = handle_update_provider(&state, update_request_with_principal(update, &bob))
                 .await
                 .unwrap_err();
-            assert_eq!(err.code(), Code::PermissionDenied);
+            assert_eq!(err.code(), Code::NotFound);
         }
 
         #[tokio::test]
@@ -5174,13 +5288,14 @@ mod tests {
                 .await
                 .unwrap();
 
+            // Information-hiding: non-owner sees NotFound, not PermissionDenied
             let err = handle_delete_provider(
                 &state,
                 delete_request_with_principal("alice-provider", &bob),
             )
             .await
             .unwrap_err();
-            assert_eq!(err.code(), Code::PermissionDenied);
+            assert_eq!(err.code(), Code::NotFound);
         }
 
         #[tokio::test]
@@ -5235,6 +5350,238 @@ mod tests {
                 "alice-uuid",
                 "spoofed owner label should be overwritten with actual caller"
             );
+        }
+
+        // ---- Scoped name uniqueness tests ----
+
+        #[tokio::test]
+        async fn two_users_can_create_same_named_provider() {
+            let state = oidc_test_state().await;
+            let alice = user_principal("alice-uuid");
+            let bob = user_principal("bob-uuid");
+
+            let p1 = provider_with_values("openai", "generic");
+            handle_create_provider(&state, create_request_with_principal(p1, &alice))
+                .await
+                .unwrap();
+
+            let p2 = provider_with_values("openai", "generic");
+            handle_create_provider(&state, create_request_with_principal(p2, &bob))
+                .await
+                .unwrap();
+
+            // Each user sees their own
+            let alice_resp =
+                handle_get_provider(&state, get_request_with_principal("openai", &alice))
+                    .await
+                    .unwrap();
+            assert_eq!(
+                alice_resp.into_inner().provider.unwrap().object_name(),
+                "openai"
+            );
+
+            let bob_resp = handle_get_provider(&state, get_request_with_principal("openai", &bob))
+                .await
+                .unwrap();
+            assert_eq!(
+                bob_resp.into_inner().provider.unwrap().object_name(),
+                "openai"
+            );
+        }
+
+        #[tokio::test]
+        async fn same_user_cannot_create_duplicate_name() {
+            let state = oidc_test_state().await;
+            let alice = user_principal("alice-uuid");
+
+            let p1 = provider_with_values("openai", "generic");
+            handle_create_provider(&state, create_request_with_principal(p1, &alice))
+                .await
+                .unwrap();
+
+            let p2 = provider_with_values("openai", "generic");
+            let err = handle_create_provider(&state, create_request_with_principal(p2, &alice))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code(), Code::AlreadyExists);
+        }
+
+        #[tokio::test]
+        async fn user_resolves_own_provider_over_shared() {
+            let state = oidc_test_state().await;
+            let alice = user_principal("alice-uuid");
+
+            // Create a shared provider (no principal)
+            let shared = Provider {
+                metadata: Some(openshell_core::proto::datamodel::v1::ObjectMeta {
+                    id: String::new(),
+                    name: "openai".to_string(),
+                    created_at_ms: 0,
+                    labels: HashMap::new(),
+                    resource_version: 0,
+                }),
+                r#type: "generic".to_string(),
+                credentials: std::iter::once(("SHARED_KEY".to_string(), "shared-val".to_string()))
+                    .collect(),
+                config: HashMap::new(),
+                credential_expires_at_ms: HashMap::new(),
+            };
+            handle_create_provider(
+                &state,
+                Request::new(CreateProviderRequest {
+                    provider: Some(shared),
+                }),
+            )
+            .await
+            .unwrap();
+
+            // Alice creates her own with the same visible name
+            let alice_provider = Provider {
+                metadata: Some(openshell_core::proto::datamodel::v1::ObjectMeta {
+                    id: String::new(),
+                    name: "openai".to_string(),
+                    created_at_ms: 0,
+                    labels: HashMap::new(),
+                    resource_version: 0,
+                }),
+                r#type: "generic".to_string(),
+                credentials: std::iter::once(("ALICE_KEY".to_string(), "alice-val".to_string()))
+                    .collect(),
+                config: HashMap::new(),
+                credential_expires_at_ms: HashMap::new(),
+            };
+            handle_create_provider(
+                &state,
+                create_request_with_principal(alice_provider, &alice),
+            )
+            .await
+            .unwrap();
+
+            // Alice's GET resolves to her own (has ALICE_KEY, not SHARED_KEY)
+            let resp = handle_get_provider(&state, get_request_with_principal("openai", &alice))
+                .await
+                .unwrap();
+            let p = resp.into_inner().provider.unwrap();
+            assert!(
+                p.credentials.contains_key("ALICE_KEY"),
+                "should resolve to Alice's own provider"
+            );
+            assert!(
+                !p.credentials.contains_key("SHARED_KEY"),
+                "should NOT resolve to shared provider"
+            );
+        }
+
+        #[tokio::test]
+        async fn user_falls_back_to_shared_when_no_own() {
+            let state = oidc_test_state().await;
+            let alice = user_principal("alice-uuid");
+
+            // Create only a shared provider
+            let shared = Provider {
+                metadata: Some(openshell_core::proto::datamodel::v1::ObjectMeta {
+                    id: String::new(),
+                    name: "openai".to_string(),
+                    created_at_ms: 0,
+                    labels: HashMap::new(),
+                    resource_version: 0,
+                }),
+                r#type: "generic".to_string(),
+                credentials: std::iter::once(("SHARED_KEY".to_string(), "shared-val".to_string()))
+                    .collect(),
+                config: HashMap::new(),
+                credential_expires_at_ms: HashMap::new(),
+            };
+            handle_create_provider(
+                &state,
+                Request::new(CreateProviderRequest {
+                    provider: Some(shared),
+                }),
+            )
+            .await
+            .unwrap();
+
+            // Alice can still GET it via fallback
+            let resp = handle_get_provider(&state, get_request_with_principal("openai", &alice))
+                .await
+                .unwrap();
+            let p = resp.into_inner().provider.unwrap();
+            assert!(p.credentials.contains_key("SHARED_KEY"));
+        }
+
+        #[tokio::test]
+        async fn response_never_exposes_scoped_db_key() {
+            let state = oidc_test_state().await;
+            let alice = user_principal("alice-uuid");
+
+            let provider = provider_with_values("openai", "generic");
+            handle_create_provider(&state, create_request_with_principal(provider, &alice))
+                .await
+                .unwrap();
+
+            // GET response shows display name, not scoped key
+            let resp = handle_get_provider(&state, get_request_with_principal("openai", &alice))
+                .await
+                .unwrap();
+            let name = resp
+                .into_inner()
+                .provider
+                .unwrap()
+                .object_name()
+                .to_string();
+            assert_eq!(name, "openai");
+            assert!(
+                !name.contains('/'),
+                "response name must not contain owner prefix"
+            );
+
+            // LIST response also strips prefixes
+            let list = handle_list_providers(&state, list_request_with_principal(&alice))
+                .await
+                .unwrap()
+                .into_inner()
+                .providers;
+            for p in &list {
+                let n = p.object_name();
+                assert!(
+                    !n.contains('/'),
+                    "listed provider name '{n}' must not contain owner prefix"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn delete_own_provider_does_not_affect_other_user_same_name() {
+            let state = oidc_test_state().await;
+            let alice = user_principal("alice-uuid");
+            let bob = user_principal("bob-uuid");
+
+            let p1 = provider_with_values("openai", "generic");
+            handle_create_provider(&state, create_request_with_principal(p1, &alice))
+                .await
+                .unwrap();
+
+            let p2 = provider_with_values("openai", "generic");
+            handle_create_provider(&state, create_request_with_principal(p2, &bob))
+                .await
+                .unwrap();
+
+            // Alice deletes her provider
+            handle_delete_provider(&state, delete_request_with_principal("openai", &alice))
+                .await
+                .unwrap();
+
+            // Bob's is still there
+            let resp = handle_get_provider(&state, get_request_with_principal("openai", &bob))
+                .await
+                .unwrap();
+            assert_eq!(resp.into_inner().provider.unwrap().object_name(), "openai");
+
+            // Alice's is gone
+            let err = handle_get_provider(&state, get_request_with_principal("openai", &alice))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code(), Code::NotFound);
         }
     }
 }
