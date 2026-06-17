@@ -22,6 +22,33 @@ use super::{
 };
 
 // ---------------------------------------------------------------------------
+// Ownership helpers
+// ---------------------------------------------------------------------------
+
+use crate::ServerState;
+
+fn admin_role_name(state: &ServerState) -> &str {
+    state
+        .config
+        .oidc
+        .as_ref()
+        .map_or("", |oidc| &oidc.admin_role)
+}
+
+/// Verify the caller owns the provider (or is an admin).
+/// Shared providers (no owner label) are accessible to all.
+#[allow(clippy::result_large_err)]
+fn check_provider_owner(
+    provider: &Provider,
+    principal: Option<&crate::auth::principal::Principal>,
+    state: &ServerState,
+) -> Result<(), Status> {
+    let empty = std::collections::HashMap::new();
+    let labels = provider.metadata.as_ref().map_or(&empty, |m| &m.labels);
+    crate::auth::ownership::check_owner(labels, principal, admin_role_name(state))
+}
+
+// ---------------------------------------------------------------------------
 // CRUD helpers
 // ---------------------------------------------------------------------------
 
@@ -111,6 +138,20 @@ pub(super) async fn create_provider_record(
         metadata.id.clone_from(&provider_id);
     }
 
+    // Serialize labels (includes ownership label if stamped) for storage index.
+    let labels_map = provider.object_labels();
+    let labels_json = if labels_map
+        .as_ref()
+        .is_none_or(std::collections::HashMap::is_empty)
+    {
+        None
+    } else {
+        Some(
+            serde_json::to_string(&labels_map)
+                .map_err(|e| Status::internal(format!("serialize labels failed: {e}")))?,
+        )
+    };
+
     // Create with MustCreate condition to prevent duplicate creation race
     let result = store
         .put_if(
@@ -118,7 +159,7 @@ pub(super) async fn create_provider_record(
             &provider_id,
             provider.object_name(),
             &provider.encode_to_vec(),
-            None,
+            labels_json.as_deref(),
             WriteCondition::MustCreate,
         )
         .await
@@ -167,6 +208,72 @@ pub(super) async fn list_provider_records(
         .into_iter()
         .map(redact_provider_credentials)
         .collect())
+}
+
+/// List providers visible to the given principal: own providers + shared (no owner).
+/// Admins and anonymous principals see all providers (backward compat).
+///
+/// For non-admin users, filters happen post-fetch since the store selector
+/// cannot express "owner=X OR no owner label". To maintain correct page sizes
+/// we loop in batches until `limit` visible results are accumulated.
+async fn list_provider_records_for_principal(
+    state: &Arc<ServerState>,
+    principal: Option<&crate::auth::principal::Principal>,
+    limit: u32,
+    offset: u32,
+) -> Result<Vec<Provider>, Status> {
+    use crate::auth::ownership::OWNER_LABEL;
+
+    let admin_role = admin_role_name(state);
+    let caller_owner = match principal {
+        Some(crate::auth::principal::Principal::User(user)) => {
+            if !admin_role.is_empty() && user.identity.roles.iter().any(|r| r == admin_role) {
+                None // Admin sees all
+            } else {
+                Some(crate::auth::ownership::sanitize_subject(
+                    &user.identity.subject,
+                )?)
+            }
+        }
+        _ => None, // Anonymous/sandbox/none → see all (backward compat)
+    };
+
+    let Some(owner_value) = caller_owner else {
+        return list_provider_records(state.store.as_ref(), limit, offset).await;
+    };
+
+    // Non-admin path: loop in batches to guarantee `limit` visible results
+    // despite post-fetch filtering. The store selector cannot express
+    // "owner=X OR no owner label", so we filter here.
+    let limit_usize = limit as usize;
+    let mut visible = Vec::new();
+    let mut current_offset = offset;
+    let batch_size = limit.max(50); // fetch at least 50 to reduce round-trips
+
+    loop {
+        let batch = list_provider_records(state.store.as_ref(), batch_size, current_offset).await?;
+        let exhausted = batch.len() < batch_size as usize;
+
+        for provider in batch {
+            let labels = provider.metadata.as_ref().map(|m| &m.labels);
+            if labels
+                .and_then(|l| l.get(OWNER_LABEL))
+                .is_none_or(|v| *v == owner_value)
+            {
+                visible.push(provider);
+                if visible.len() >= limit_usize {
+                    return Ok(visible);
+                }
+            }
+        }
+
+        if exhausted {
+            break;
+        }
+        current_offset += batch_size;
+    }
+
+    Ok(visible)
 }
 
 pub(super) async fn update_provider_record(
@@ -688,7 +795,6 @@ impl ObjectType for Provider {
 // Handler wrappers called from the trait impl in mod.rs
 // ---------------------------------------------------------------------------
 
-use crate::ServerState;
 use openshell_core::proto::{
     ConfigureProviderRefreshRequest, ConfigureProviderRefreshResponse, CreateProviderRequest,
     DeleteProviderProfileRequest, DeleteProviderProfileResponse, DeleteProviderRefreshRequest,
@@ -713,8 +819,12 @@ pub(super) async fn handle_create_provider(
     state: &Arc<ServerState>,
     request: Request<CreateProviderRequest>,
 ) -> Result<Response<ProviderResponse>, Status> {
+    let principal = request
+        .extensions()
+        .get::<crate::auth::principal::Principal>()
+        .cloned();
     let req = request.into_inner();
-    let Some(provider) = req.provider else {
+    let Some(mut provider) = req.provider else {
         emit_provider_lifecycle(
             "custom",
             LifecycleOperation::Create,
@@ -722,6 +832,24 @@ pub(super) async fn handle_create_provider(
         );
         return Err(Status::invalid_argument("provider is required"));
     };
+
+    // Stamp ownership on the provider's metadata labels (same pattern as sandbox).
+    // When OIDC is not configured (principal is None), skip ownership stamping
+    // to maintain backward compatibility with single-user local dev.
+    if principal.is_some() {
+        let labels = &mut provider
+            .metadata
+            .get_or_insert_with(|| openshell_core::proto::datamodel::v1::ObjectMeta {
+                id: String::new(),
+                name: String::new(),
+                created_at_ms: 0,
+                labels: std::collections::HashMap::new(),
+                resource_version: 0,
+            })
+            .labels;
+        crate::auth::ownership::stamp_owner(labels, principal.as_ref())?;
+    }
+
     let provider_type = provider.r#type.clone();
     let result = create_provider_record(state.store.as_ref(), provider).await;
     match result {
@@ -750,8 +878,13 @@ pub(super) async fn handle_get_provider(
     state: &Arc<ServerState>,
     request: Request<GetProviderRequest>,
 ) -> Result<Response<ProviderResponse>, Status> {
+    let principal = request
+        .extensions()
+        .get::<crate::auth::principal::Principal>()
+        .cloned();
     let name = request.into_inner().name;
     let provider = get_provider_record(state.store.as_ref(), &name).await?;
+    check_provider_owner(&provider, principal.as_ref(), state)?;
 
     Ok(Response::new(ProviderResponse {
         provider: Some(provider),
@@ -762,9 +895,14 @@ pub(super) async fn handle_list_providers(
     state: &Arc<ServerState>,
     request: Request<ListProvidersRequest>,
 ) -> Result<Response<ListProvidersResponse>, Status> {
-    let request = request.into_inner();
-    let limit = clamp_limit(request.limit, 100, MAX_PAGE_SIZE);
-    let providers = list_provider_records(state.store.as_ref(), limit, request.offset).await?;
+    let principal = request
+        .extensions()
+        .get::<crate::auth::principal::Principal>()
+        .cloned();
+    let req = request.into_inner();
+    let limit = clamp_limit(req.limit, 100, MAX_PAGE_SIZE);
+    let providers =
+        list_provider_records_for_principal(state, principal.as_ref(), limit, req.offset).await?;
 
     Ok(Response::new(ListProvidersResponse { providers }))
 }
@@ -1158,6 +1296,10 @@ pub(super) async fn handle_update_provider(
     state: &Arc<ServerState>,
     request: Request<UpdateProviderRequest>,
 ) -> Result<Response<ProviderResponse>, Status> {
+    let principal = request
+        .extensions()
+        .get::<crate::auth::principal::Principal>()
+        .cloned();
     let req = request.into_inner();
     let Some(mut provider) = req.provider else {
         emit_provider_lifecycle(
@@ -1168,6 +1310,23 @@ pub(super) async fn handle_update_provider(
         return Err(Status::invalid_argument("provider is required"));
     };
     let provider_type = provider.r#type.clone();
+
+    // Ownership check: verify caller owns the existing provider before allowing update.
+    let provider_name = provider.metadata.as_ref().map_or("", |m| m.name.as_str());
+    if !provider_name.is_empty() {
+        let existing = state
+            .store
+            .get_message_by_name::<Provider>(provider_name)
+            .await
+            .map_err(|e| Status::internal(format!("fetch provider failed: {e}")))?;
+        let Some(ref existing) = existing else {
+            return Err(Status::not_found(format!(
+                "provider '{provider_name}' not found"
+            )));
+        };
+        check_provider_owner(existing, principal.as_ref(), state)?;
+    }
+
     provider
         .credential_expires_at_ms
         .extend(req.credential_expires_at_ms);
@@ -1198,6 +1357,10 @@ pub(super) async fn handle_get_provider_refresh_status(
     state: &Arc<ServerState>,
     request: Request<GetProviderRefreshStatusRequest>,
 ) -> Result<Response<GetProviderRefreshStatusResponse>, Status> {
+    let principal = request
+        .extensions()
+        .get::<crate::auth::principal::Principal>()
+        .cloned();
     let request = request.into_inner();
     if request.provider.trim().is_empty() {
         return Err(Status::invalid_argument("provider is required"));
@@ -1208,6 +1371,7 @@ pub(super) async fn handle_get_provider_refresh_status(
         .await
         .map_err(|e| Status::internal(format!("fetch provider failed: {e}")))?
         .ok_or_else(|| Status::not_found("provider not found"))?;
+    check_provider_owner(&provider, principal.as_ref(), state)?;
 
     let states = if request.credential_key.trim().is_empty() {
         crate::provider_refresh::list_refresh_states_for_provider(
@@ -1238,6 +1402,10 @@ pub(super) async fn handle_configure_provider_refresh(
     state: &Arc<ServerState>,
     request: Request<ConfigureProviderRefreshRequest>,
 ) -> Result<Response<ConfigureProviderRefreshResponse>, Status> {
+    let principal = request
+        .extensions()
+        .get::<crate::auth::principal::Principal>()
+        .cloned();
     let request = request.into_inner();
     let provider_name = request.provider.trim();
     let credential_key = request.credential_key.trim();
@@ -1325,6 +1493,7 @@ pub(super) async fn handle_configure_provider_refresh(
         .await
         .map_err(|e| Status::internal(format!("fetch provider failed: {e}")))?
         .ok_or_else(|| Status::not_found("provider not found"))?;
+    check_provider_owner(&provider, principal.as_ref(), state)?;
     validate_provider_credential_key_available_for_attached_sandboxes(
         state.store.as_ref(),
         &provider,
@@ -1436,6 +1605,10 @@ pub(super) async fn handle_rotate_provider_credential(
     state: &Arc<ServerState>,
     request: Request<RotateProviderCredentialRequest>,
 ) -> Result<Response<RotateProviderCredentialResponse>, Status> {
+    let principal = request
+        .extensions()
+        .get::<crate::auth::principal::Principal>()
+        .cloned();
     let request = request.into_inner();
     let provider_name = request.provider.trim();
     let credential_key = request.credential_key.trim();
@@ -1445,6 +1618,13 @@ pub(super) async fn handle_rotate_provider_credential(
     if credential_key.is_empty() {
         return Err(Status::invalid_argument("credential_key is required"));
     }
+    let provider = state
+        .store
+        .get_message_by_name::<Provider>(provider_name)
+        .await
+        .map_err(|e| Status::internal(format!("fetch provider failed: {e}")))?
+        .ok_or_else(|| Status::not_found("provider not found"))?;
+    check_provider_owner(&provider, principal.as_ref(), state)?;
     let refresh_state = crate::provider_refresh::refresh_provider_credential(
         state.store.as_ref(),
         provider_name,
@@ -1463,6 +1643,10 @@ pub(super) async fn handle_delete_provider_refresh(
     state: &Arc<ServerState>,
     request: Request<DeleteProviderRefreshRequest>,
 ) -> Result<Response<DeleteProviderRefreshResponse>, Status> {
+    let principal = request
+        .extensions()
+        .get::<crate::auth::principal::Principal>()
+        .cloned();
     let request = request.into_inner();
     let provider_name = request.provider.trim();
     let credential_key = request.credential_key.trim();
@@ -1478,6 +1662,7 @@ pub(super) async fn handle_delete_provider_refresh(
         .await
         .map_err(|e| Status::internal(format!("fetch provider failed: {e}")))?
         .ok_or_else(|| Status::not_found("provider not found"))?;
+    check_provider_owner(&provider, principal.as_ref(), state)?;
     let existing_refresh_state = crate::provider_refresh::get_refresh_state(
         state.store.as_ref(),
         provider.object_id(),
@@ -1529,7 +1714,23 @@ pub(super) async fn handle_delete_provider(
     state: &Arc<ServerState>,
     request: Request<DeleteProviderRequest>,
 ) -> Result<Response<DeleteProviderResponse>, Status> {
+    let principal = request
+        .extensions()
+        .get::<crate::auth::principal::Principal>()
+        .cloned();
     let name = request.into_inner().name;
+
+    // Ownership check: verify caller owns the provider before allowing delete.
+    let existing = state
+        .store
+        .get_message_by_name::<Provider>(&name)
+        .await
+        .map_err(|e| Status::internal(format!("fetch provider failed: {e}")))?;
+    let Some(ref existing) = existing else {
+        return Err(Status::not_found(format!("provider '{name}' not found")));
+    };
+    check_provider_owner(existing, principal.as_ref(), state)?;
+
     let provider_profile = provider_profile_for_name(state.store.as_ref(), &name).await;
     let result = delete_provider_record(state.store.as_ref(), &name).await;
     match result {
@@ -4591,5 +4792,449 @@ mod tests {
             .filter(|i| final_provider.credentials.contains_key(&format!("KEY_{i}")))
             .count();
         assert_eq!(new_keys_count, 1);
+    }
+
+    // ---- Per-user provider ownership isolation tests ----
+
+    mod ownership_tests {
+        use super::*;
+        use std::sync::Arc;
+
+        use crate::auth::identity::{Identity, IdentityProvider};
+        use crate::auth::ownership::OWNER_LABEL;
+        use crate::auth::principal::{Principal, UserPrincipal};
+        use crate::compute::new_test_runtime;
+        use crate::persistence::Store;
+        use crate::sandbox_index::SandboxIndex;
+        use crate::sandbox_watch::SandboxWatchBus;
+        use crate::tracing_bus::TracingLogBus;
+        use openshell_core::OidcConfig;
+
+        async fn oidc_test_state() -> Arc<ServerState> {
+            let store = Arc::new(
+                Store::connect("sqlite::memory:?cache=shared")
+                    .await
+                    .unwrap(),
+            );
+            let compute = new_test_runtime(store.clone()).await;
+            let config = openshell_core::Config::new(None)
+                .with_database_url("sqlite::memory:?cache=shared")
+                .with_oidc(OidcConfig {
+                    issuer: "http://test-issuer".to_string(),
+                    audience: "test-audience".to_string(),
+                    jwks_ttl_secs: 3600,
+                    roles_claim: "realm_access.roles".to_string(),
+                    admin_role: "openshell-admin".to_string(),
+                    user_role: "openshell-user".to_string(),
+                    scopes_claim: String::new(),
+                });
+            Arc::new(ServerState::new(
+                config,
+                store,
+                compute,
+                SandboxIndex::new(),
+                SandboxWatchBus::new(),
+                TracingLogBus::new(),
+                Arc::new(crate::supervisor_session::SupervisorSessionRegistry::new()),
+                None,
+                None,
+            ))
+        }
+
+        fn user_principal(subject: &str) -> Principal {
+            Principal::User(UserPrincipal {
+                identity: Identity {
+                    subject: subject.to_string(),
+                    display_name: None,
+                    roles: vec!["openshell-user".to_string()],
+                    scopes: vec![],
+                    provider: IdentityProvider::Oidc,
+                },
+            })
+        }
+
+        fn admin_principal() -> Principal {
+            Principal::User(UserPrincipal {
+                identity: Identity {
+                    subject: "admin-uuid".to_string(),
+                    display_name: None,
+                    roles: vec!["openshell-admin".to_string(), "openshell-user".to_string()],
+                    scopes: vec![],
+                    provider: IdentityProvider::Oidc,
+                },
+            })
+        }
+
+        fn create_request_with_principal(
+            provider: Provider,
+            principal: &Principal,
+        ) -> Request<CreateProviderRequest> {
+            let mut req = Request::new(CreateProviderRequest {
+                provider: Some(provider),
+            });
+            req.extensions_mut().insert(principal.clone());
+            req
+        }
+
+        fn get_request_with_principal(
+            name: &str,
+            principal: &Principal,
+        ) -> Request<GetProviderRequest> {
+            let mut req = Request::new(GetProviderRequest {
+                name: name.to_string(),
+            });
+            req.extensions_mut().insert(principal.clone());
+            req
+        }
+
+        fn list_request_with_principal(principal: &Principal) -> Request<ListProvidersRequest> {
+            let mut req = Request::new(ListProvidersRequest {
+                limit: 100,
+                offset: 0,
+            });
+            req.extensions_mut().insert(principal.clone());
+            req
+        }
+
+        fn delete_request_with_principal(
+            name: &str,
+            principal: &Principal,
+        ) -> Request<DeleteProviderRequest> {
+            let mut req = Request::new(DeleteProviderRequest {
+                name: name.to_string(),
+            });
+            req.extensions_mut().insert(principal.clone());
+            req
+        }
+
+        fn update_request_with_principal(
+            provider: Provider,
+            principal: &Principal,
+        ) -> Request<UpdateProviderRequest> {
+            let mut req = Request::new(UpdateProviderRequest {
+                provider: Some(provider),
+                credential_expires_at_ms: HashMap::new(),
+            });
+            req.extensions_mut().insert(principal.clone());
+            req
+        }
+
+        #[tokio::test]
+        async fn create_stamps_owner_label() {
+            let state = oidc_test_state().await;
+            let alice = user_principal("alice-uuid");
+            let provider = provider_with_values("alice-provider", "generic");
+
+            let response =
+                handle_create_provider(&state, create_request_with_principal(provider, &alice))
+                    .await
+                    .unwrap();
+
+            let created = response.into_inner().provider.unwrap();
+            let labels = &created.metadata.as_ref().unwrap().labels;
+            assert_eq!(labels.get(OWNER_LABEL).unwrap(), "alice-uuid");
+        }
+
+        #[tokio::test]
+        async fn owner_can_get_own_provider() {
+            let state = oidc_test_state().await;
+            let alice = user_principal("alice-uuid");
+            let provider = provider_with_values("alice-provider", "generic");
+
+            handle_create_provider(&state, create_request_with_principal(provider, &alice))
+                .await
+                .unwrap();
+
+            let response =
+                handle_get_provider(&state, get_request_with_principal("alice-provider", &alice))
+                    .await
+                    .unwrap();
+            assert_eq!(
+                response.into_inner().provider.unwrap().object_name(),
+                "alice-provider"
+            );
+        }
+
+        #[tokio::test]
+        async fn non_owner_denied_get() {
+            let state = oidc_test_state().await;
+            let alice = user_principal("alice-uuid");
+            let bob = user_principal("bob-uuid");
+            let provider = provider_with_values("alice-provider", "generic");
+
+            handle_create_provider(&state, create_request_with_principal(provider, &alice))
+                .await
+                .unwrap();
+
+            let err =
+                handle_get_provider(&state, get_request_with_principal("alice-provider", &bob))
+                    .await
+                    .unwrap_err();
+            assert_eq!(err.code(), Code::PermissionDenied);
+        }
+
+        #[tokio::test]
+        async fn admin_can_get_any_provider() {
+            let state = oidc_test_state().await;
+            let alice = user_principal("alice-uuid");
+            let admin = admin_principal();
+            let provider = provider_with_values("alice-provider", "generic");
+
+            handle_create_provider(&state, create_request_with_principal(provider, &alice))
+                .await
+                .unwrap();
+
+            let response =
+                handle_get_provider(&state, get_request_with_principal("alice-provider", &admin))
+                    .await
+                    .unwrap();
+            assert_eq!(
+                response.into_inner().provider.unwrap().object_name(),
+                "alice-provider"
+            );
+        }
+
+        #[tokio::test]
+        async fn list_shows_own_and_shared_providers() {
+            let state = oidc_test_state().await;
+            let alice = user_principal("alice-uuid");
+            let bob = user_principal("bob-uuid");
+
+            // Alice creates a provider
+            let p1 = provider_with_values("alice-provider", "generic");
+            handle_create_provider(&state, create_request_with_principal(p1, &alice))
+                .await
+                .unwrap();
+
+            // Bob creates a provider
+            let p2 = provider_with_values("bob-provider", "generic");
+            handle_create_provider(&state, create_request_with_principal(p2, &bob))
+                .await
+                .unwrap();
+
+            // Create a shared provider (no principal → no owner label)
+            let shared = provider_with_values("shared-provider", "generic");
+            handle_create_provider(
+                &state,
+                Request::new(CreateProviderRequest {
+                    provider: Some(shared),
+                }),
+            )
+            .await
+            .unwrap();
+
+            // Alice lists: sees her own + shared, not Bob's
+            let alice_list = handle_list_providers(&state, list_request_with_principal(&alice))
+                .await
+                .unwrap()
+                .into_inner()
+                .providers;
+
+            let alice_names: Vec<&str> = alice_list.iter().map(Provider::object_name).collect();
+            assert!(alice_names.contains(&"alice-provider"));
+            assert!(alice_names.contains(&"shared-provider"));
+            assert!(!alice_names.contains(&"bob-provider"));
+
+            // Bob lists: sees his own + shared, not Alice's
+            let bob_list = handle_list_providers(&state, list_request_with_principal(&bob))
+                .await
+                .unwrap()
+                .into_inner()
+                .providers;
+
+            let bob_names: Vec<&str> = bob_list.iter().map(Provider::object_name).collect();
+            assert!(bob_names.contains(&"bob-provider"));
+            assert!(bob_names.contains(&"shared-provider"));
+            assert!(!bob_names.contains(&"alice-provider"));
+        }
+
+        #[tokio::test]
+        async fn admin_list_sees_all_providers() {
+            let state = oidc_test_state().await;
+            let alice = user_principal("alice-uuid");
+            let admin = admin_principal();
+
+            let p1 = provider_with_values("alice-provider", "generic");
+            handle_create_provider(&state, create_request_with_principal(p1, &alice))
+                .await
+                .unwrap();
+
+            let shared = provider_with_values("shared-provider", "generic");
+            handle_create_provider(
+                &state,
+                Request::new(CreateProviderRequest {
+                    provider: Some(shared),
+                }),
+            )
+            .await
+            .unwrap();
+
+            let admin_list = handle_list_providers(&state, list_request_with_principal(&admin))
+                .await
+                .unwrap()
+                .into_inner()
+                .providers;
+
+            let names: Vec<&str> = admin_list.iter().map(Provider::object_name).collect();
+            assert!(names.contains(&"alice-provider"));
+            assert!(names.contains(&"shared-provider"));
+        }
+
+        #[tokio::test]
+        async fn owner_can_update_own_provider() {
+            let state = oidc_test_state().await;
+            let alice = user_principal("alice-uuid");
+            let provider = provider_with_values("alice-provider", "generic");
+
+            handle_create_provider(&state, create_request_with_principal(provider, &alice))
+                .await
+                .unwrap();
+
+            let update = Provider {
+                metadata: Some(openshell_core::proto::datamodel::v1::ObjectMeta {
+                    id: String::new(),
+                    name: "alice-provider".to_string(),
+                    created_at_ms: 0,
+                    labels: HashMap::new(),
+                    resource_version: 0,
+                }),
+                r#type: String::new(),
+                credentials: HashMap::from([("NEW_KEY".to_string(), "new-val".to_string())]),
+                config: HashMap::new(),
+                credential_expires_at_ms: HashMap::new(),
+            };
+
+            let response =
+                handle_update_provider(&state, update_request_with_principal(update, &alice))
+                    .await
+                    .unwrap();
+
+            let updated = response.into_inner().provider.unwrap();
+            assert!(updated.credentials.contains_key("NEW_KEY"));
+        }
+
+        #[tokio::test]
+        async fn non_owner_denied_update() {
+            let state = oidc_test_state().await;
+            let alice = user_principal("alice-uuid");
+            let bob = user_principal("bob-uuid");
+            let provider = provider_with_values("alice-provider", "generic");
+
+            handle_create_provider(&state, create_request_with_principal(provider, &alice))
+                .await
+                .unwrap();
+
+            let update = Provider {
+                metadata: Some(openshell_core::proto::datamodel::v1::ObjectMeta {
+                    id: String::new(),
+                    name: "alice-provider".to_string(),
+                    created_at_ms: 0,
+                    labels: HashMap::new(),
+                    resource_version: 0,
+                }),
+                r#type: String::new(),
+                credentials: HashMap::from([("STOLEN".to_string(), "val".to_string())]),
+                config: HashMap::new(),
+                credential_expires_at_ms: HashMap::new(),
+            };
+
+            let err = handle_update_provider(&state, update_request_with_principal(update, &bob))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code(), Code::PermissionDenied);
+        }
+
+        #[tokio::test]
+        async fn owner_can_delete_own_provider() {
+            let state = oidc_test_state().await;
+            let alice = user_principal("alice-uuid");
+            let provider = provider_with_values("alice-provider", "generic");
+
+            handle_create_provider(&state, create_request_with_principal(provider, &alice))
+                .await
+                .unwrap();
+
+            let response = handle_delete_provider(
+                &state,
+                delete_request_with_principal("alice-provider", &alice),
+            )
+            .await
+            .unwrap();
+            assert!(response.into_inner().deleted);
+        }
+
+        #[tokio::test]
+        async fn non_owner_denied_delete() {
+            let state = oidc_test_state().await;
+            let alice = user_principal("alice-uuid");
+            let bob = user_principal("bob-uuid");
+            let provider = provider_with_values("alice-provider", "generic");
+
+            handle_create_provider(&state, create_request_with_principal(provider, &alice))
+                .await
+                .unwrap();
+
+            let err = handle_delete_provider(
+                &state,
+                delete_request_with_principal("alice-provider", &bob),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.code(), Code::PermissionDenied);
+        }
+
+        #[tokio::test]
+        async fn shared_provider_accessible_by_any_user() {
+            let state = oidc_test_state().await;
+            let bob = user_principal("bob-uuid");
+
+            // Create provider without principal (shared/legacy)
+            let shared = provider_with_values("shared-provider", "generic");
+            handle_create_provider(
+                &state,
+                Request::new(CreateProviderRequest {
+                    provider: Some(shared),
+                }),
+            )
+            .await
+            .unwrap();
+
+            // Any user can get it
+            let response =
+                handle_get_provider(&state, get_request_with_principal("shared-provider", &bob))
+                    .await
+                    .unwrap();
+            assert_eq!(
+                response.into_inner().provider.unwrap().object_name(),
+                "shared-provider"
+            );
+        }
+
+        #[tokio::test]
+        async fn create_strips_spoofed_owner_label() {
+            let state = oidc_test_state().await;
+            let alice = user_principal("alice-uuid");
+
+            let mut provider = provider_with_values("test-provider", "generic");
+            provider
+                .metadata
+                .as_mut()
+                .unwrap()
+                .labels
+                .insert(OWNER_LABEL.to_string(), "spoofed-uuid".to_string());
+
+            let response =
+                handle_create_provider(&state, create_request_with_principal(provider, &alice))
+                    .await
+                    .unwrap();
+
+            let created = response.into_inner().provider.unwrap();
+            let labels = &created.metadata.as_ref().unwrap().labels;
+            assert_eq!(
+                labels.get(OWNER_LABEL).unwrap(),
+                "alice-uuid",
+                "spoofed owner label should be overwritten with actual caller"
+            );
+        }
     }
 }

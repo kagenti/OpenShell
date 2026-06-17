@@ -1,11 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Per-user sandbox ownership enforcement.
+//! Per-user object ownership enforcement.
 //!
-//! Stamps an `openshell.ai/owner` label on sandboxes at creation time (from the
-//! verified caller identity) and gates access on subsequent operations. Admin
-//! callers bypass the ownership check.
+//! Stamps an `openshell.ai/owner` label on objects (sandboxes, providers) at
+//! creation time (from the verified caller identity) and gates access on
+//! subsequent operations. Admin callers bypass the ownership check.
 
 #![allow(clippy::result_large_err)]
 
@@ -18,7 +18,7 @@ use tonic::Status;
 use super::identity::Identity;
 use super::principal::Principal;
 
-/// Reserved label key for sandbox ownership. Server-set, never client-controlled.
+/// Reserved label key for object ownership. Server-set, never client-controlled.
 pub const OWNER_LABEL: &str = "openshell.ai/owner";
 
 /// Reserved label key prefix. All keys starting with this are stripped from
@@ -84,13 +84,13 @@ pub fn check_owner(
     admin_role: &str,
 ) -> Result<(), Status> {
     let Some(owner_value) = sandbox_labels.get(OWNER_LABEL) else {
-        // No owner label → legacy sandbox, allow access.
+        // No owner label → legacy/shared object, allow access.
         return Ok(());
     };
 
     let Some(identity) = principal_identity(principal) else {
         return Err(Status::permission_denied(
-            "sandbox is owned; authenticated identity required",
+            "object is owned; authenticated identity required",
         ));
     };
 
@@ -101,7 +101,7 @@ pub fn check_owner(
 
     let caller_value = sanitize_subject(&identity.subject)?;
     if caller_value != *owner_value {
-        return Err(Status::permission_denied("you do not own this sandbox"));
+        return Err(Status::permission_denied("you do not own this resource"));
     }
 
     Ok(())
@@ -140,7 +140,7 @@ fn require_identity(principal: Option<&Principal>) -> Result<&Identity, Status> 
     match principal {
         Some(Principal::User(user)) => Ok(&user.identity),
         Some(Principal::Sandbox(_) | Principal::Anonymous) | None => Err(Status::unauthenticated(
-            "authenticated user identity required for sandbox operations",
+            "authenticated user identity required for ownership operations",
         )),
     }
 }

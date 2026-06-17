@@ -356,7 +356,7 @@ impl OpenShell for OpenShellService {
 
     // --- Providers ---
 
-    #[rpc_auth(auth = "bearer", scope = "provider:write", role = "admin")]
+    #[rpc_auth(auth = "bearer", scope = "provider:write", role = "user")]
     async fn create_provider(
         &self,
         request: Request<CreateProviderRequest>,
@@ -412,7 +412,7 @@ impl OpenShell for OpenShellService {
         provider::handle_lint_provider_profiles(&self.state, request).await
     }
 
-    #[rpc_auth(auth = "bearer", scope = "provider:write", role = "admin")]
+    #[rpc_auth(auth = "bearer", scope = "provider:write", role = "user")]
     async fn update_provider(
         &self,
         request: Request<UpdateProviderRequest>,
@@ -428,7 +428,7 @@ impl OpenShell for OpenShellService {
         provider::handle_get_provider_refresh_status(&self.state, request).await
     }
 
-    #[rpc_auth(auth = "bearer", scope = "provider:write", role = "admin")]
+    #[rpc_auth(auth = "bearer", scope = "provider:write", role = "user")]
     async fn configure_provider_refresh(
         &self,
         request: Request<ConfigureProviderRefreshRequest>,
@@ -436,7 +436,7 @@ impl OpenShell for OpenShellService {
         provider::handle_configure_provider_refresh(&self.state, request).await
     }
 
-    #[rpc_auth(auth = "bearer", scope = "provider:write", role = "admin")]
+    #[rpc_auth(auth = "bearer", scope = "provider:write", role = "user")]
     async fn rotate_provider_credential(
         &self,
         request: Request<RotateProviderCredentialRequest>,
@@ -444,7 +444,7 @@ impl OpenShell for OpenShellService {
         provider::handle_rotate_provider_credential(&self.state, request).await
     }
 
-    #[rpc_auth(auth = "bearer", scope = "provider:write", role = "admin")]
+    #[rpc_auth(auth = "bearer", scope = "provider:write", role = "user")]
     async fn delete_provider_refresh(
         &self,
         request: Request<DeleteProviderRefreshRequest>,
@@ -452,7 +452,7 @@ impl OpenShell for OpenShellService {
         provider::handle_delete_provider_refresh(&self.state, request).await
     }
 
-    #[rpc_auth(auth = "bearer", scope = "provider:write", role = "admin")]
+    #[rpc_auth(auth = "bearer", scope = "provider:write", role = "user")]
     async fn delete_provider(
         &self,
         request: Request<DeleteProviderRequest>,

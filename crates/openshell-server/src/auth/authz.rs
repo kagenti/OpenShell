@@ -185,7 +185,7 @@ mod tests {
         let policy = default_policy();
         assert!(
             policy
-                .check(&id, "/openshell.v1.OpenShell/CreateProvider")
+                .check(&id, "/openshell.v1.OpenShell/ImportProviderProfiles")
                 .is_err()
         );
     }
@@ -408,7 +408,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_refresh_methods_require_provider_scopes_and_admin_for_writes() {
+    fn provider_refresh_methods_require_provider_scopes_and_user_role() {
         let policy = scoped_policy();
         let reader = identity_with_roles_and_scopes(&["openshell-user"], &["provider:read"]);
         assert!(
@@ -417,37 +417,28 @@ mod tests {
                 .is_ok()
         );
 
-        let writer_without_admin =
-            identity_with_roles_and_scopes(&["openshell-user"], &["provider:write"]);
-        let err = policy
-            .check(
-                &writer_without_admin,
-                "/openshell.v1.OpenShell/ConfigureProviderRefresh",
-            )
-            .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::PermissionDenied);
-        assert!(err.message().contains("openshell-admin"));
-
-        let admin_without_scope =
-            identity_with_roles_and_scopes(&["openshell-admin"], &["provider:read"]);
-        let err = policy
-            .check(
-                &admin_without_scope,
-                "/openshell.v1.OpenShell/RotateProviderCredential",
-            )
-            .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::PermissionDenied);
-        assert!(err.message().contains("provider:write"));
-
-        let admin_writer =
-            identity_with_roles_and_scopes(&["openshell-admin"], &["provider:write"]);
+        // User with provider:write scope and user role can call write methods
+        // (ownership enforcement happens in the handler, not RBAC).
+        let user_writer = identity_with_roles_and_scopes(&["openshell-user"], &["provider:write"]);
         for method in [
             "/openshell.v1.OpenShell/ConfigureProviderRefresh",
             "/openshell.v1.OpenShell/RotateProviderCredential",
             "/openshell.v1.OpenShell/DeleteProviderRefresh",
         ] {
-            assert!(policy.check(&admin_writer, method).is_ok(), "{method}");
+            assert!(policy.check(&user_writer, method).is_ok(), "{method}");
         }
+
+        // Without the write scope, user is still denied.
+        let user_without_scope =
+            identity_with_roles_and_scopes(&["openshell-user"], &["provider:read"]);
+        let err = policy
+            .check(
+                &user_without_scope,
+                "/openshell.v1.OpenShell/ConfigureProviderRefresh",
+            )
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        assert!(err.message().contains("provider:write"));
     }
 
     #[test]
@@ -493,10 +484,16 @@ mod tests {
                 .check(&id, "/openshell.v1.OpenShell/GetProvider")
                 .is_ok()
         );
-        // admin methods still denied by role check
+        // User can now create providers (ownership enforced in handler).
         assert!(
             policy
                 .check(&id, "/openshell.v1.OpenShell/CreateProvider")
+                .is_ok()
+        );
+        // Admin methods still denied by role check.
+        assert!(
+            policy
+                .check(&id, "/openshell.v1.OpenShell/ImportProviderProfiles")
                 .is_err()
         );
     }

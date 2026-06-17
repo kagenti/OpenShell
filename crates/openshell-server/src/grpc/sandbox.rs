@@ -359,7 +359,7 @@ pub(super) async fn handle_attach_sandbox_provider(
         )));
     }
 
-    get_provider_record(state.store.as_ref(), &request.provider_name)
+    let provider = get_provider_record(state.store.as_ref(), &request.provider_name)
         .await
         .map_err(|err| {
             if err.code() == tonic::Code::NotFound {
@@ -371,6 +371,21 @@ pub(super) async fn handle_attach_sandbox_provider(
                 err
             }
         })?;
+
+    // Verify the caller can use this provider (must be own or shared).
+    let empty = std::collections::HashMap::new();
+    let provider_labels = provider.metadata.as_ref().map_or(&empty, |m| &m.labels);
+    crate::auth::ownership::check_owner(
+        provider_labels,
+        principal.as_ref(),
+        admin_role_name(state),
+    )
+    .map_err(|_| {
+        Status::permission_denied(format!(
+            "provider '{}' is owned by another user",
+            request.provider_name
+        ))
+    })?;
 
     let _sandbox_sync_guard = state.compute.sandbox_sync_guard().await;
     let sandbox = sandbox_by_name(state, &request.sandbox_name).await?;
@@ -2534,6 +2549,103 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    }
+
+    #[tokio::test]
+    async fn attach_sandbox_provider_rejects_other_users_provider() {
+        use crate::auth::identity::{Identity, IdentityProvider};
+        use crate::auth::ownership::OWNER_LABEL;
+        use crate::auth::principal::{Principal, UserPrincipal};
+
+        let state = test_server_state().await;
+
+        // Create a provider owned by alice
+        let mut provider = test_provider("alice-llm", "generic");
+        provider
+            .metadata
+            .as_mut()
+            .unwrap()
+            .labels
+            .insert(OWNER_LABEL.to_string(), "alice-uuid".to_string());
+        state.store.put_message(&provider).await.unwrap();
+
+        // Create a sandbox owned by bob
+        let mut sandbox = test_sandbox("bob-work", Vec::new());
+        sandbox
+            .metadata
+            .as_mut()
+            .unwrap()
+            .labels
+            .insert(OWNER_LABEL.to_string(), "bob-uuid".to_string());
+        state.store.put_message(&sandbox).await.unwrap();
+
+        // Bob tries to attach alice's provider
+        let bob = Principal::User(UserPrincipal {
+            identity: Identity {
+                subject: "bob-uuid".to_string(),
+                display_name: None,
+                roles: vec!["openshell-user".to_string()],
+                scopes: vec![],
+                provider: IdentityProvider::Oidc,
+            },
+        });
+        let mut req = Request::new(AttachSandboxProviderRequest {
+            sandbox_name: "bob-work".to_string(),
+            provider_name: "alice-llm".to_string(),
+            expected_resource_version: 0,
+        });
+        req.extensions_mut().insert(bob);
+
+        let err = handle_attach_sandbox_provider(&state, req)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        assert!(err.message().contains("owned by another user"));
+    }
+
+    #[tokio::test]
+    async fn attach_sandbox_provider_allows_shared_provider() {
+        use crate::auth::identity::{Identity, IdentityProvider};
+        use crate::auth::ownership::OWNER_LABEL;
+        use crate::auth::principal::{Principal, UserPrincipal};
+
+        let state = test_server_state().await;
+
+        // Shared provider (no owner label)
+        state
+            .store
+            .put_message(&test_provider("shared-llm", "generic"))
+            .await
+            .unwrap();
+
+        // Sandbox owned by bob
+        let mut sandbox = test_sandbox("bob-work", Vec::new());
+        sandbox
+            .metadata
+            .as_mut()
+            .unwrap()
+            .labels
+            .insert(OWNER_LABEL.to_string(), "bob-uuid".to_string());
+        state.store.put_message(&sandbox).await.unwrap();
+
+        let bob = Principal::User(UserPrincipal {
+            identity: Identity {
+                subject: "bob-uuid".to_string(),
+                display_name: None,
+                roles: vec!["openshell-user".to_string()],
+                scopes: vec![],
+                provider: IdentityProvider::Oidc,
+            },
+        });
+        let mut req = Request::new(AttachSandboxProviderRequest {
+            sandbox_name: "bob-work".to_string(),
+            provider_name: "shared-llm".to_string(),
+            expected_resource_version: 0,
+        });
+        req.extensions_mut().insert(bob);
+
+        let response = handle_attach_sandbox_provider(&state, req).await.unwrap();
+        assert!(response.into_inner().attached);
     }
 
     // ---- validate_interactive_exec_start ----
