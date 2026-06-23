@@ -167,7 +167,9 @@ impl Inference for InferenceService {
 
         let sandbox_id = match principal {
             Some(crate::auth::principal::Principal::Sandbox(sp)) => &sp.sandbox_id,
-            _ => unreachable!("authorize_inference_bundle ensures Sandbox variant"),
+            _ => {
+                return Err(Status::internal("unexpected principal variant"));
+            }
         };
 
         let sandbox_owner = self
@@ -2878,5 +2880,280 @@ mod tests {
             "version should be 2 (one update won, one conflicted) or 3 (both succeeded sequentially), got {}",
             route.version
         );
+    }
+
+    // ---- Per-user ownership scoping tests ----
+
+    fn test_admin_principal() -> Principal {
+        Principal::User(UserPrincipal {
+            identity: Identity {
+                subject: "admin-uuid".to_string(),
+                display_name: None,
+                roles: vec!["openshell-admin".to_string(), "openshell-user".to_string()],
+                scopes: vec![],
+                provider: IdentityProvider::Oidc,
+            },
+        })
+    }
+
+    fn test_user_b_principal() -> Principal {
+        Principal::User(UserPrincipal {
+            identity: Identity {
+                subject: "user-b".to_string(),
+                display_name: None,
+                roles: vec!["openshell-user".to_string()],
+                scopes: vec![],
+                provider: IdentityProvider::Oidc,
+            },
+        })
+    }
+
+    #[test]
+    fn scoped_route_name_non_admin_creates_scoped_name() {
+        let principal = test_user_principal();
+        let result = scoped_route_name("cluster", Some(&principal), "openshell-admin").unwrap();
+        assert_eq!(result, "cluster/user-a");
+    }
+
+    #[test]
+    fn scoped_route_name_admin_gets_global_name() {
+        let principal = test_admin_principal();
+        let result = scoped_route_name("cluster", Some(&principal), "openshell-admin").unwrap();
+        assert_eq!(result, "cluster");
+    }
+
+    #[test]
+    fn scoped_route_name_anonymous_gets_global_name() {
+        let result =
+            scoped_route_name("cluster", Some(&Principal::Anonymous), "openshell-admin").unwrap();
+        assert_eq!(result, "cluster");
+    }
+
+    #[test]
+    fn scoped_route_name_none_principal_gets_global_name() {
+        let result = scoped_route_name("cluster", None, "openshell-admin").unwrap();
+        assert_eq!(result, "cluster");
+    }
+
+    #[test]
+    fn scoped_route_name_sandbox_rejected() {
+        let principal = test_sandbox_principal();
+        let err = scoped_route_name("cluster", Some(&principal), "openshell-admin").unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn upsert_non_admin_creates_scoped_route() {
+        let store = test_store().await;
+        let provider = make_provider("openai-dev", "openai", "OPENAI_API_KEY", "sk-test");
+        store.put_message(&provider).await.expect("persist");
+
+        let user = test_user_principal();
+        let result = upsert_cluster_inference_route(
+            &store,
+            "cluster/user-a",
+            "openai-dev",
+            "gpt-4o",
+            0,
+            false,
+            Some(&user),
+            "openshell-admin",
+        )
+        .await
+        .expect("create should succeed");
+        assert_eq!(result.route.object_name(), "cluster/user-a");
+    }
+
+    #[tokio::test]
+    async fn upsert_non_owner_blocked_from_updating_another_users_route() {
+        let store = test_store().await;
+        let provider = make_provider("openai-dev", "openai", "OPENAI_API_KEY", "sk-test");
+        store.put_message(&provider).await.expect("persist");
+
+        let user_a = test_user_principal();
+        upsert_cluster_inference_route(
+            &store,
+            "cluster/user-a",
+            "openai-dev",
+            "gpt-4o",
+            0,
+            false,
+            Some(&user_a),
+            "openshell-admin",
+        )
+        .await
+        .expect("owner create");
+
+        let user_b = test_user_b_principal();
+        let err = upsert_cluster_inference_route(
+            &store,
+            "cluster/user-a",
+            "openai-dev",
+            "gpt-4.1",
+            0,
+            false,
+            Some(&user_b),
+            "openshell-admin",
+        )
+        .await
+        .expect_err("non-owner should be blocked");
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn resolve_get_route_falls_back_to_global() {
+        let store = test_store().await;
+        let provider = make_provider("openai-dev", "openai", "OPENAI_API_KEY", "sk-test");
+        store.put_message(&provider).await.expect("persist");
+
+        // Create a global route (no owner)
+        upsert_cluster_inference_route(
+            &store,
+            CLUSTER_INFERENCE_ROUTE_NAME,
+            "openai-dev",
+            "gpt-4o",
+            0,
+            false,
+            None,
+            "",
+        )
+        .await
+        .expect("global create");
+
+        // Non-admin user with no personal route should fall back to global
+        let user = test_user_principal();
+        let route = resolve_get_route(
+            &store,
+            CLUSTER_INFERENCE_ROUTE_NAME,
+            Some(&user),
+            "openshell-admin",
+        )
+        .await
+        .expect("should fall back to global");
+        let config = route.config.as_ref().expect("config");
+        assert_eq!(config.model_id, "gpt-4o");
+    }
+
+    #[tokio::test]
+    async fn resolve_get_route_prefers_per_user_route() {
+        let store = test_store().await;
+        let provider = make_provider("openai-dev", "openai", "OPENAI_API_KEY", "sk-test");
+        store.put_message(&provider).await.expect("persist");
+
+        // Create global route
+        upsert_cluster_inference_route(
+            &store,
+            CLUSTER_INFERENCE_ROUTE_NAME,
+            "openai-dev",
+            "gpt-4o",
+            0,
+            false,
+            None,
+            "",
+        )
+        .await
+        .expect("global");
+
+        // Create per-user route
+        let user = test_user_principal();
+        upsert_cluster_inference_route(
+            &store,
+            &format!("{CLUSTER_INFERENCE_ROUTE_NAME}/user-a"),
+            "openai-dev",
+            "gpt-4.1",
+            0,
+            false,
+            Some(&user),
+            "openshell-admin",
+        )
+        .await
+        .expect("per-user");
+
+        // resolve_get_route should prefer the per-user route
+        let route = resolve_get_route(
+            &store,
+            CLUSTER_INFERENCE_ROUTE_NAME,
+            Some(&user),
+            "openshell-admin",
+        )
+        .await
+        .expect("should find per-user route");
+        let config = route.config.as_ref().expect("config");
+        assert_eq!(config.model_id, "gpt-4.1");
+    }
+
+    #[tokio::test]
+    async fn resolve_route_for_owner_with_sandbox_owner() {
+        let store = test_store().await;
+        let provider = make_provider("openai-dev", "openai", "OPENAI_API_KEY", "sk-test");
+        store.put_message(&provider).await.expect("persist");
+
+        // Create global route
+        upsert_cluster_inference_route(
+            &store,
+            CLUSTER_INFERENCE_ROUTE_NAME,
+            "openai-dev",
+            "gpt-4o",
+            0,
+            false,
+            None,
+            "",
+        )
+        .await
+        .expect("global");
+
+        // Create per-user route for user-a
+        let user = test_user_principal();
+        upsert_cluster_inference_route(
+            &store,
+            &format!("{CLUSTER_INFERENCE_ROUTE_NAME}/user-a"),
+            "openai-dev",
+            "gpt-4.1",
+            0,
+            false,
+            Some(&user),
+            "openshell-admin",
+        )
+        .await
+        .expect("per-user");
+
+        // resolve_route_for_owner with owner=user-a should find per-user route
+        let resolved =
+            resolve_route_for_owner(&store, CLUSTER_INFERENCE_ROUTE_NAME, Some("user-a"))
+                .await
+                .expect("should resolve");
+        let resolved = resolved.expect("should find a route");
+        // Name should be the BASE name (not scoped) for sandbox proxy compatibility
+        assert_eq!(resolved.name, CLUSTER_INFERENCE_ROUTE_NAME);
+        assert_eq!(resolved.model_id, "gpt-4.1");
+    }
+
+    #[tokio::test]
+    async fn resolve_route_for_owner_falls_back_without_per_user() {
+        let store = test_store().await;
+        let provider = make_provider("openai-dev", "openai", "OPENAI_API_KEY", "sk-test");
+        store.put_message(&provider).await.expect("persist");
+
+        // Only global route exists
+        upsert_cluster_inference_route(
+            &store,
+            CLUSTER_INFERENCE_ROUTE_NAME,
+            "openai-dev",
+            "gpt-4o",
+            0,
+            false,
+            None,
+            "",
+        )
+        .await
+        .expect("global");
+
+        // Sandbox owner has no personal route → falls back to global
+        let resolved =
+            resolve_route_for_owner(&store, CLUSTER_INFERENCE_ROUTE_NAME, Some("user-x"))
+                .await
+                .expect("should resolve");
+        let resolved = resolved.expect("should fall back to global");
+        assert_eq!(resolved.model_id, "gpt-4o");
     }
 }
