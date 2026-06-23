@@ -297,13 +297,17 @@ async fn upsert_cluster_inference_route(
         return Err(Status::invalid_argument("model_id is required"));
     }
 
-    let provider = store
-        .get_message_by_name::<Provider>(provider_name)
-        .await
-        .map_err(|e| Status::internal(format!("fetch provider failed: {e}")))?
-        .ok_or_else(|| {
-            Status::failed_precondition(format!("provider '{provider_name}' not found"))
-        })?;
+    let provider_record = crate::auth::ownership::resolve_scoped_name(
+        store,
+        Provider::object_type(),
+        provider_name,
+        principal,
+        admin_role,
+    )
+    .await?
+    .ok_or_else(|| Status::failed_precondition(format!("provider '{provider_name}' not found")))?;
+    let provider = Provider::decode(provider_record.payload.as_slice())
+        .map_err(|e| Status::internal(format!("decode provider failed: {e}")))?;
 
     let empty = std::collections::HashMap::new();
     let provider_labels = provider.metadata.as_ref().map_or(&empty, |m| &m.labels);
