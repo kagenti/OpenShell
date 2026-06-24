@@ -5,8 +5,8 @@
 
 use crate::policy::{LandlockCompatibility, NetworkMode, SandboxPolicy};
 use landlock::{
-    ABI, Access, AccessFs, CompatLevel, Compatible, PathBeneath, PathFd, PathFdError, Ruleset,
-    RulesetAttr, RulesetCreatedAttr, Scope,
+    ABI, Access, AccessFs, AccessNet, CompatLevel, Compatible, NetPort, PathBeneath, PathFd,
+    PathFdError, Ruleset, RulesetAttr, RulesetCreatedAttr, Scope,
 };
 use miette::{IntoDiagnostic, Result};
 use std::path::{Path, PathBuf};
@@ -184,6 +184,7 @@ pub fn prepare(policy: &SandboxPolicy, workdir: Option<&str>) -> Result<Option<P
             .handle_access(access_all)
             .into_diagnostic()?;
 
+<<<<<<< HEAD
         // Platform mode: restrict abstract Unix sockets and signals.
         // Without a network namespace, abstract Unix sockets in the pod
         // are visible to the agent. This scope prevents connecting to
@@ -195,6 +196,15 @@ pub fn prepare(policy: &SandboxPolicy, workdir: Option<&str>) -> Result<Option<P
                 .scope(Scope::AbstractUnixSocket)
                 .into_diagnostic()?;
             ruleset = ruleset.scope(Scope::Signal).into_diagnostic()?;
+=======
+        // Platform mode: declare intent to handle TCP connect access.
+        // BestEffort compat level: silently succeeds on kernels without
+        // ABI v4 (restriction has no effect but doesn't break anything).
+        if matches!(policy.network.mode, NetworkMode::Platform) {
+            ruleset = ruleset
+                .handle_access(AccessNet::ConnectTcp)
+                .into_diagnostic()?;
+>>>>>>> 5c72320 (feat(sandbox): Landlock TCP port restriction in Platform mode)
         }
 
         let mut ruleset = ruleset.create().into_diagnostic()?;
@@ -220,6 +230,28 @@ pub fn prepare(policy: &SandboxPolicy, workdir: Option<&str>) -> Result<Option<P
             }
         }
 
+        if matches!(policy.network.mode, NetworkMode::Platform) {
+            let proxy_port = policy
+                .network
+                .proxy
+                .as_ref()
+                .and_then(|p| p.http_addr)
+                .map_or(3128_u16, |addr| addr.port());
+
+            // BestEffort compat level: add_rule silently succeeds even if
+            // ABI v4 is unavailable. The rule has no effect on older kernels,
+            // but the proxy still works cooperatively.
+            ruleset = ruleset
+                .add_rule(NetPort::new(proxy_port, AccessNet::ConnectTcp))
+                .into_diagnostic()?;
+            debug!(
+                port = proxy_port,
+                "Landlock TCP connect rule added (proxy port only, \
+                 effective on kernels with ABI v4+)"
+            );
+            rules_applied += 1;
+        }
+
         if rules_applied == 0 {
             return Err(miette::miette!(
                 "Landlock ruleset has zero valid paths — all {} path(s) failed to open. \
@@ -228,7 +260,7 @@ pub fn prepare(policy: &SandboxPolicy, workdir: Option<&str>) -> Result<Option<P
             ));
         }
 
-        let skipped = total_paths - rules_applied;
+        let skipped = total_paths.saturating_sub(rules_applied);
         openshell_ocsf::ocsf_emit!(
             openshell_ocsf::ConfigStateChangeBuilder::new(crate::ocsf_ctx())
                 .severity(openshell_ocsf::SeverityId::Informational)
