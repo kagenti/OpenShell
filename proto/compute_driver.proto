@@ -6,6 +6,7 @@ syntax = "proto3";
 package openshell.compute.v1;
 
 import "google/protobuf/struct.proto";
+import "sandbox.proto";
 
 // Internal compute-driver contract used by the gateway.
 //
@@ -96,6 +97,10 @@ message DriverSandboxSpec {
   // ServiceAccount token bootstrap instead). Never echoed to the public
   // Sandbox proto.
   string sandbox_token = 11;
+  // Network enforcement mode for this sandbox. When set to
+  // NETWORK_ENFORCEMENT_PLATFORM (1), the sandbox runs without elevated
+  // capabilities. Populated by the gateway from the SandboxPolicy.
+  openshell.sandbox.v1.NetworkEnforcementMode network_enforcement = 12;
 }
 
 // Driver-owned runtime template consumed by the compute platform.

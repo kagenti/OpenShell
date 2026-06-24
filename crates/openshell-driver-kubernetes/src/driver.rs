@@ -330,6 +330,10 @@ impl KubernetesComputeDriver {
             enable_user_namespaces: self.config.enable_user_namespaces,
             workspace_default_storage_size: &self.config.workspace_default_storage_size,
             sa_token_ttl_secs: self.config.effective_sa_token_ttl_secs(),
+            is_platform_mode: sandbox
+                .spec
+                .as_ref()
+                .is_some_and(|s| s.network_enforcement == 1),
         };
         obj.data = sandbox_to_k8s_spec(sandbox.spec.as_ref(), &params);
         let api = self.api();
@@ -823,6 +827,7 @@ fn apply_supervisor_sideload(
     supervisor_image: &str,
     supervisor_image_pull_policy: &str,
     method: SupervisorSideloadMethod,
+    is_platform_mode: bool,
 ) {
     let Some(spec) = pod_template.get_mut("spec").and_then(|v| v.as_object_mut()) else {
         return;
@@ -882,16 +887,16 @@ fn apply_supervisor_sideload(
             serde_json::json!([format!("{}/openshell-sandbox", SUPERVISOR_MOUNT_PATH)]),
         );
 
-        // Force the supervisor to run as root (UID 0). Sandbox images may set
-        // a non-root USER directive (e.g. `USER sandbox`), but the supervisor
-        // needs root to create network namespaces, set up the proxy, and
-        // configure Landlock/seccomp. The supervisor itself drops privileges
-        // for child processes via the policy's `run_as_user`/`run_as_group`.
-        let security_context = container
-            .entry("securityContext")
-            .or_insert_with(|| serde_json::json!({}));
-        if let Some(sc) = security_context.as_object_mut() {
-            sc.insert("runAsUser".to_string(), serde_json::json!(0));
+        // In namespace mode, force root (UID 0) so the supervisor can create
+        // network namespaces and drop privileges for child processes.
+        // In platform mode, keep the image's default non-root user.
+        if !is_platform_mode {
+            let security_context = container
+                .entry("securityContext")
+                .or_insert_with(|| serde_json::json!({}));
+            if let Some(sc) = security_context.as_object_mut() {
+                sc.insert("runAsUser".to_string(), serde_json::json!(0));
+            }
         }
 
         // Add volume mount
@@ -1044,6 +1049,10 @@ struct SandboxPodParams<'a> {
     /// Lifetime (seconds) of the projected `ServiceAccount` token used
     /// for the bootstrap `IssueSandboxToken` exchange.
     sa_token_ttl_secs: i64,
+    /// Platform network enforcement mode (Issue #899). When true, sandbox
+    /// pods are emitted without elevated capabilities, compatible with
+    /// restricted-v2 SCC and restricted Pod Security Standard.
+    is_platform_mode: bool,
 }
 
 impl Default for SandboxPodParams<'_> {
@@ -1065,6 +1074,7 @@ impl Default for SandboxPodParams<'_> {
             enable_user_namespaces: false,
             workspace_default_storage_size: DEFAULT_WORKSPACE_STORAGE_SIZE,
             sa_token_ttl_secs: 3600,
+            is_platform_mode: false,
         }
     }
 }
@@ -1265,22 +1275,32 @@ fn sandbox_template_to_k8s(
 
     container.insert("env".to_string(), serde_json::Value::Array(env));
 
-    let mut capabilities: Vec<&str> = vec!["SYS_ADMIN", "NET_ADMIN", "SYS_PTRACE", "SYSLOG"];
-    if use_user_namespaces {
-        // In a user namespace the bounding set is reset. SETUID/SETGID are
-        // needed for the supervisor to drop privileges to the sandbox user.
-        // DAC_READ_SEARCH is needed for cross-UID /proc/<pid>/fd/ access
-        // for process identity resolution in network policy enforcement.
-        capabilities.extend(["SETUID", "SETGID", "DAC_READ_SEARCH"]);
+    if params.is_platform_mode {
+        // Platform mode: zero elevated capabilities. Compatible with
+        // restricted-v2 SCC and restricted Pod Security Standard.
+        container.insert(
+            "securityContext".to_string(),
+            serde_json::json!({
+                "allowPrivilegeEscalation": false,
+                "capabilities": {
+                    "drop": ["ALL"]
+                }
+            }),
+        );
+    } else {
+        let mut capabilities: Vec<&str> = vec!["SYS_ADMIN", "NET_ADMIN", "SYS_PTRACE", "SYSLOG"];
+        if use_user_namespaces {
+            capabilities.extend(["SETUID", "SETGID", "DAC_READ_SEARCH"]);
+        }
+        container.insert(
+            "securityContext".to_string(),
+            serde_json::json!({
+                "capabilities": {
+                    "add": capabilities
+                }
+            }),
+        );
     }
-    container.insert(
-        "securityContext".to_string(),
-        serde_json::json!({
-            "capabilities": {
-                "add": capabilities
-            }
-        }),
-    );
 
     // Mount client TLS secret for mTLS to the server, plus the projected
     // ServiceAccount token used to bootstrap the sandbox's gateway JWT
@@ -1363,6 +1383,7 @@ fn sandbox_template_to_k8s(
         params.supervisor_image,
         params.supervisor_image_pull_policy,
         params.supervisor_sideload_method,
+        params.is_platform_mode,
     );
 
     // Inject workspace persistence (init container + PVC volume mount) so
@@ -1750,6 +1771,7 @@ mod tests {
             "custom-image:latest",
             "IfNotPresent",
             SupervisorSideloadMethod::InitContainer,
+            false,
         );
 
         let sc = &pod_template["spec"]["containers"][0]["securityContext"];
@@ -1779,6 +1801,7 @@ mod tests {
             "supervisor-image:latest",
             "IfNotPresent",
             SupervisorSideloadMethod::InitContainer,
+            false,
         );
 
         let sc = &pod_template["spec"]["containers"][0]["securityContext"];
@@ -1804,6 +1827,7 @@ mod tests {
             "supervisor-image:latest",
             "IfNotPresent",
             SupervisorSideloadMethod::InitContainer,
+            false,
         );
 
         // Volume should be an emptyDir
@@ -1878,6 +1902,7 @@ mod tests {
             "supervisor-image:latest",
             "IfNotPresent",
             SupervisorSideloadMethod::ImageVolume,
+            false,
         );
 
         let volumes = pod_template["spec"]["volumes"]
@@ -1932,6 +1957,7 @@ mod tests {
             "supervisor-image:latest",
             "",
             SupervisorSideloadMethod::ImageVolume,
+            false,
         );
 
         let volume = &pod_template["spec"]["volumes"][0];

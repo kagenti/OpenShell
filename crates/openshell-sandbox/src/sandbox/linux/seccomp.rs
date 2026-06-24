@@ -70,7 +70,10 @@ pub fn apply_supervisor_prelude() -> Result<()> {
 }
 
 pub fn apply(policy: &SandboxPolicy) -> Result<()> {
-    let allow_inet = matches!(policy.network.mode, NetworkMode::Proxy | NetworkMode::Allow);
+    let allow_inet = matches!(
+        policy.network.mode,
+        NetworkMode::Proxy | NetworkMode::Allow | NetworkMode::Platform
+    );
     let main_filter = build_filter(allow_inet)?;
     let clone3_filter = build_clone3_filter()?;
 
@@ -200,6 +203,21 @@ fn build_filter_rules(allow_inet: bool) -> Result<BTreeMap<i64, Vec<SeccompRule>
     for domain in blocked_domains {
         debug!(domain, "Blocking socket domain via seccomp");
         add_socket_domain_rule(&mut rules, domain)?;
+    }
+
+    // Block UDP sockets (SOCK_DGRAM) on AF_INET/AF_INET6.
+    //
+    // The agent doesn't need UDP: all traffic goes through the CONNECT proxy
+    // on 127.0.0.1:3128, which resolves DNS on behalf of the agent. This
+    // matches Full OpenShell behavior where nftables rejects all UDP in the
+    // network namespace (nft_ruleset.rs:48-49 has no UDP accept rule).
+    //
+    // Without this block, an agent could exfiltrate data via DNS tunneling
+    // (encoding secrets in DNS subdomain labels) or send UDP packets to
+    // arbitrary destinations -- Landlock ABI v4 only covers TCP.
+    if allow_inet {
+        add_sock_dgram_block(&mut rules, libc::AF_INET)?;
+        add_sock_dgram_block(&mut rules, libc::AF_INET6)?;
     }
 
     // Allow AF_NETLINK only for NETLINK_ROUTE (protocol 0).
@@ -335,6 +353,29 @@ fn add_netlink_non_route_rule(rules: &mut BTreeMap<i64, Vec<SeccompRule>>) -> Re
     .into_diagnostic()?;
 
     let rule = SeccompRule::new(vec![domain_condition, protocol_condition]).into_diagnostic()?;
+    rules.entry(libc::SYS_socket).or_default().push(rule);
+    Ok(())
+}
+
+/// Block `socket(domain, SOCK_DGRAM, *)` to prevent UDP socket creation.
+///
+/// Uses `MaskedEq` on arg1 with mask `0xF` (SOCK_TYPE_MASK) to match
+/// `SOCK_DGRAM` (2) regardless of `SOCK_NONBLOCK` or `SOCK_CLOEXEC` flags.
+#[allow(clippy::cast_sign_loss)]
+fn add_sock_dgram_block(rules: &mut BTreeMap<i64, Vec<SeccompRule>>, domain: i32) -> Result<()> {
+    let domain_condition =
+        SeccompCondition::new(0, SeccompCmpArgLen::Dword, SeccompCmpOp::Eq, domain as u64)
+            .into_diagnostic()?;
+
+    let type_condition = SeccompCondition::new(
+        1, // type argument
+        SeccompCmpArgLen::Dword,
+        SeccompCmpOp::MaskedEq(0xF), // SOCK_TYPE_MASK
+        libc::SOCK_DGRAM as u64,
+    )
+    .into_diagnostic()?;
+
+    let rule = SeccompRule::new(vec![domain_condition, type_condition]).into_diagnostic()?;
     rules.entry(libc::SYS_socket).or_default().push(rule);
     Ok(())
 }
