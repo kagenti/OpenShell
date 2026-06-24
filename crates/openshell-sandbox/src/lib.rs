@@ -23,6 +23,7 @@ pub mod procfs;
 mod provider_credentials;
 pub mod proxy;
 mod sandbox;
+pub mod seccomp_notify;
 mod secrets;
 mod skills;
 mod ssh;
