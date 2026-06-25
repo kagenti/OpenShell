@@ -261,6 +261,34 @@ pub fn write_ca_files(
     Ok((ca_cert_path, combined_path))
 }
 
+/// Write an externally-supplied CA PEM into the workload trust store.
+///
+/// Like [`write_ca_files`] but for `External` network mode — there is no
+/// `SandboxCa`/keypair, just the CA certificate to trust. Writes
+/// `openshell-ca.pem` (the CA) + `ca-bundle.pem` (system bundle + the CA) and
+/// returns `(ca_cert_path, combined_bundle_path)`.
+pub fn write_external_ca_files(
+    ca_pem: &str,
+    output_dir: &Path,
+    system_ca_bundle: &str,
+) -> Result<(PathBuf, PathBuf)> {
+    std::fs::create_dir_all(output_dir).into_diagnostic()?;
+
+    let ca_cert_path = output_dir.join("openshell-ca.pem");
+    std::fs::write(&ca_cert_path, ca_pem).into_diagnostic()?;
+
+    let mut combined = system_ca_bundle.to_string();
+    if !combined.is_empty() && !combined.ends_with('\n') {
+        combined.push('\n');
+    }
+    combined.push_str(ca_pem);
+
+    let combined_path = output_dir.join("ca-bundle.pem");
+    std::fs::write(&combined_path, &combined).into_diagnostic()?;
+
+    Ok((ca_cert_path, combined_path))
+}
+
 /// Load PEM-encoded certificates from a string into a root certificate store.
 ///
 /// Returns `(added, ignored)` counts. Invalid or unparseable certificates

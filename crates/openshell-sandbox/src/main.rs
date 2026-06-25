@@ -82,6 +82,20 @@ struct Args {
     #[arg(long, env = "OPENSHELL_POLICY_DATA")]
     policy_data: Option<String>,
 
+    /// External egress proxy address (host:port). Enables `External` network
+    /// mode: the supervisor keeps netns containment but does NOT start its
+    /// internal proxy — sandbox egress is routed here (an `AuthBridge` sidecar).
+    /// Takes effect together with --external-ca; defaults to 10.200.0.1:3128
+    /// when --external-ca is set without this flag.
+    #[arg(long, env = "OPENSHELL_EXTERNAL_PROXY")]
+    external_proxy: Option<String>,
+
+    /// Path to the external proxy's CA certificate (PEM). Written into the
+    /// workload trust store so the sandbox trusts the external proxy's forged
+    /// leaf certs. Presence selects `External` network mode.
+    #[arg(long, env = "OPENSHELL_EXTERNAL_CA")]
+    external_ca: Option<String>,
+
     /// Log level (trace, debug, info, warn, error).
     #[arg(long, default_value = "warn", env = openshell_core::sandbox_env::LOG_LEVEL)]
     log_level: String,
@@ -302,6 +316,8 @@ fn main() -> Result<()> {
             args.openshell_endpoint,
             args.policy_rules,
             args.policy_data,
+            args.external_proxy,
+            args.external_ca,
             args.ssh_socket_path,
             args.health_check,
             args.health_port,

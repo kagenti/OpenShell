@@ -62,12 +62,24 @@ pub enum NetworkMode {
     Block,
     Proxy,
     Allow,
+    /// Like `Proxy` (netns containment + workload CA trust + `HTTP_PROXY`
+    /// env) but the supervisor does NOT start its internal proxy. Egress is
+    /// routed to an external proxy (an `AuthBridge` sidecar) and the workload
+    /// trusts an externally-supplied CA. See [`ProxyPolicy::external_ca`].
+    External,
 }
 
 #[derive(Debug, Clone)]
 pub struct ProxyPolicy {
-    /// TCP address for a local HTTP proxy (loopback-only).
+    /// TCP address for a local HTTP proxy (loopback-only). In `External` mode
+    /// this carries the external proxy (`AuthBridge` sidecar) address; only the
+    /// port is used in netns mode (the veth host IP is fixed at 10.200.0.1).
     pub http_addr: Option<SocketAddr>,
+
+    /// Path to an externally-supplied CA certificate (PEM) to write into the
+    /// workload trust store. Set only in `External` mode; the supervisor reads
+    /// this instead of generating an ephemeral CA.
+    pub external_ca: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -103,7 +115,10 @@ impl TryFrom<ProtoSandboxPolicy> for SandboxPolicy {
         // can be evaluated by OPA and `inference.local` is always addressable.
         let network = NetworkPolicy {
             mode: NetworkMode::Proxy,
-            proxy: Some(ProxyPolicy { http_addr: None }),
+            proxy: Some(ProxyPolicy {
+                http_addr: None,
+                external_ca: None,
+            }),
         };
 
         Ok(Self {

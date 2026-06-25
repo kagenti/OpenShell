@@ -226,7 +226,10 @@ impl ProcessHandle {
             cmd.current_dir(dir);
         }
 
-        if matches!(policy.network.mode, NetworkMode::Proxy) {
+        if matches!(
+            policy.network.mode,
+            NetworkMode::Proxy | NetworkMode::External
+        ) {
             let proxy = policy.network.proxy.as_ref().ok_or_else(|| {
                 miette::miette!(
                     "Network mode is set to proxy but no proxy configuration was provided"
@@ -368,7 +371,10 @@ impl ProcessHandle {
             cmd.current_dir(dir);
         }
 
-        if matches!(policy.network.mode, NetworkMode::Proxy) {
+        if matches!(
+            policy.network.mode,
+            NetworkMode::Proxy | NetworkMode::External
+        ) {
             let proxy = policy.network.proxy.as_ref().ok_or_else(|| {
                 miette::miette!(
                     "Network mode is set to proxy but no proxy configuration was provided"

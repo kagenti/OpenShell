@@ -172,7 +172,7 @@ pub(crate) mod test_helpers {
 use crate::identity::BinaryIdentityCache;
 use crate::l7::tls::{
     CertCache, ProxyTlsState, SandboxCa, build_upstream_client_config, read_system_ca_bundle,
-    write_ca_files,
+    write_ca_files, write_external_ca_files,
 };
 use crate::opa::OpaEngine;
 use crate::policy::{NetworkMode, NetworkPolicy, ProxyPolicy, SandboxPolicy};
@@ -298,7 +298,11 @@ fn is_managed_child(pid: i32) -> bool {
 /// # Errors
 ///
 /// Returns an error if the command fails to start or encounters a fatal error.
-#[allow(clippy::too_many_arguments, clippy::similar_names)]
+#[allow(
+    clippy::too_many_arguments,
+    clippy::similar_names,
+    clippy::option_if_let_else
+)]
 pub async fn run_sandbox(
     command: Vec<String>,
     workdir: Option<String>,
@@ -309,6 +313,8 @@ pub async fn run_sandbox(
     openshell_endpoint: Option<String>,
     policy_rules: Option<String>,
     policy_data: Option<String>,
+    external_proxy: Option<String>,
+    external_ca: Option<String>,
     ssh_socket_path: Option<String>,
     _health_check: bool,
     _health_port: u16,
@@ -348,7 +354,7 @@ pub async fn run_sandbox(
     // Load policy and initialize OPA engine
     let openshell_endpoint_for_proxy = openshell_endpoint.clone();
     let sandbox_name_for_agg = sandbox.clone();
-    let (policy, opa_engine, retained_proto) = load_policy(
+    let (mut policy, opa_engine, retained_proto) = load_policy(
         sandbox_id.clone(),
         sandbox,
         openshell_endpoint.clone(),
@@ -356,6 +362,17 @@ pub async fn run_sandbox(
         policy_data,
     )
     .await?;
+
+    // Enable External network mode (egress via an AuthBridge sidecar) when an
+    // external CA is configured. See apply_external_network_mode.
+    if apply_external_network_mode(
+        &mut policy,
+        external_proxy.as_deref(),
+        external_ca.as_deref(),
+    )? {
+        info!("External network mode enabled (egress via AuthBridge sidecar)");
+    }
+
     let policy_local_ctx = Arc::new(policy_local::PolicyLocalContext::new(
         retained_proto.clone(),
         openshell_endpoint.clone(),
@@ -540,6 +557,62 @@ pub async fn run_sandbox(
                 (None, None)
             }
         }
+    } else if matches!(policy.network.mode, NetworkMode::External) {
+        // External mode: trust an externally-supplied CA (the AuthBridge
+        // sidecar's tls-bridge CA) instead of generating one, and build no TLS
+        // termination state (no internal proxy runs in this mode).
+        let ca_path = policy
+            .network
+            .proxy
+            .as_ref()
+            .and_then(|p| p.external_ca.clone());
+        match ca_path {
+            Some(path) => match std::fs::read_to_string(&path) {
+                Ok(ca_pem) => {
+                    let tls_dir = std::path::Path::new("/etc/openshell-tls");
+                    let system_ca_bundle = read_system_ca_bundle();
+                    match write_external_ca_files(&ca_pem, tls_dir, &system_ca_bundle) {
+                        Ok(paths) => {
+                            ocsf_emit!(
+                                ConfigStateChangeBuilder::new(ocsf_ctx())
+                                    .severity(SeverityId::Informational)
+                                    .status(StatusId::Success)
+                                    .state(StateId::Enabled, "enabled")
+                                    .message("External egress mode: external CA trust installed")
+                                    .build()
+                            );
+                            (None, Some(paths))
+                        }
+                        Err(e) => {
+                            ocsf_emit!(
+                                ConfigStateChangeBuilder::new(ocsf_ctx())
+                                    .severity(SeverityId::Medium)
+                                    .status(StatusId::Failure)
+                                    .state(StateId::Disabled, "disabled")
+                                    .message(format!("Failed to write external CA files: {e}"))
+                                    .build()
+                            );
+                            (None, None)
+                        }
+                    }
+                }
+                Err(e) => {
+                    ocsf_emit!(
+                        ConfigStateChangeBuilder::new(ocsf_ctx())
+                            .severity(SeverityId::Medium)
+                            .status(StatusId::Failure)
+                            .state(StateId::Disabled, "disabled")
+                            .message(format!(
+                                "Failed to read external CA {}: {e}",
+                                path.display()
+                            ))
+                            .build()
+                    );
+                    (None, None)
+                }
+            },
+            None => (None, None),
+        }
     } else {
         (None, None)
     };
@@ -548,7 +621,10 @@ pub async fn run_sandbox(
     // This must be created before the proxy AND SSH server so that SSH
     // sessions can enter the namespace for network isolation.
     #[cfg(target_os = "linux")]
-    let netns = if matches!(policy.network.mode, NetworkMode::Proxy) {
+    let netns = if matches!(
+        policy.network.mode,
+        NetworkMode::Proxy | NetworkMode::External
+    ) {
         match NetworkNamespace::create() {
             Ok(ns) => {
                 // Install bypass detection rules (nftables log + reject).
@@ -705,7 +781,10 @@ pub async fn run_sandbox(
     #[cfg(not(target_os = "linux"))]
     let ssh_netns_fd: Option<i32> = None;
 
-    let ssh_proxy_url = if matches!(policy.network.mode, NetworkMode::Proxy) {
+    let ssh_proxy_url = if matches!(
+        policy.network.mode,
+        NetworkMode::Proxy | NetworkMode::External
+    ) {
         #[cfg(target_os = "linux")]
         {
             netns.as_ref().map(|ns| {
@@ -1729,8 +1808,10 @@ where
 }
 
 fn enrich_sandbox_baseline_paths(policy: &mut SandboxPolicy) {
-    let (ro, rw) =
-        active_baseline_enrichment_paths(matches!(policy.network.mode, NetworkMode::Proxy));
+    let (ro, rw) = active_baseline_enrichment_paths(matches!(
+        policy.network.mode,
+        NetworkMode::Proxy | NetworkMode::External
+    ));
     let modified = enrich_sandbox_baseline_paths_with(policy, &ro, &rw, std::path::Path::exists);
 
     if modified {
@@ -1947,7 +2028,10 @@ mod baseline_tests {
             },
             network: NetworkPolicy {
                 mode: NetworkMode::Proxy,
-                proxy: Some(ProxyPolicy { http_addr: None }),
+                proxy: Some(ProxyPolicy {
+                    http_addr: None,
+                    external_ca: None,
+                }),
             },
             landlock: LandlockPolicy::default(),
             process: ProcessPolicy::default(),
@@ -2057,6 +2141,34 @@ where
     ))
 }
 
+/// Override the loaded policy into `External` network mode when an external CA
+/// is configured. In External mode the supervisor keeps netns containment but
+/// does NOT start its internal proxy: egress is routed to `external_proxy`
+/// (default `10.200.0.1:3128`, the veth host IP where an `AuthBridge` sidecar
+/// binds) and the workload trusts `external_ca`. Returns whether External mode
+/// was enabled. Errors only on an unparseable `external_proxy` address.
+fn apply_external_network_mode(
+    policy: &mut SandboxPolicy,
+    external_proxy: Option<&str>,
+    external_ca: Option<&str>,
+) -> Result<bool> {
+    let Some(ca_path) = external_ca else {
+        return Ok(false);
+    };
+    let addr: SocketAddr = match external_proxy {
+        Some(s) => s
+            .parse()
+            .map_err(|e| miette::miette!("invalid --external-proxy address {s:?}: {e}"))?,
+        None => SocketAddr::from(([10, 200, 0, 1], 3128)),
+    };
+    policy.network.mode = NetworkMode::External;
+    policy.network.proxy = Some(ProxyPolicy {
+        http_addr: Some(addr),
+        external_ca: Some(std::path::PathBuf::from(ca_path)),
+    });
+    Ok(true)
+}
+
 /// Load sandbox policy from local files or gRPC.
 ///
 /// Priority:
@@ -2101,7 +2213,10 @@ async fn load_policy(
             filesystem: config.filesystem,
             network: NetworkPolicy {
                 mode: NetworkMode::Proxy,
-                proxy: Some(ProxyPolicy { http_addr: None }),
+                proxy: Some(ProxyPolicy {
+                    http_addr: None,
+                    external_ca: None,
+                }),
             },
             landlock: config.landlock,
             process: config.process,
@@ -2911,6 +3026,53 @@ mod tests {
     use temp_env::with_vars;
 
     static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    fn external_test_policy() -> SandboxPolicy {
+        SandboxPolicy {
+            version: 1,
+            filesystem: FilesystemPolicy::default(),
+            network: NetworkPolicy::default(),
+            landlock: LandlockPolicy::default(),
+            process: ProcessPolicy::default(),
+        }
+    }
+
+    #[test]
+    fn external_mode_disabled_without_ca() {
+        let mut p = external_test_policy();
+        let enabled = apply_external_network_mode(&mut p, Some("1.2.3.4:9999"), None).unwrap();
+        assert!(!enabled);
+        assert!(matches!(p.network.mode, NetworkMode::Block));
+    }
+
+    #[test]
+    fn external_mode_enabled_with_ca_defaults_addr() {
+        let mut p = external_test_policy();
+        let enabled = apply_external_network_mode(&mut p, None, Some("/tmp/ca.pem")).unwrap();
+        assert!(enabled);
+        assert!(matches!(p.network.mode, NetworkMode::External));
+        let proxy = p.network.proxy.expect("proxy set");
+        assert_eq!(proxy.http_addr.expect("addr").port(), 3128);
+        assert_eq!(
+            proxy.external_ca.expect("ca").to_str().unwrap(),
+            "/tmp/ca.pem"
+        );
+    }
+
+    #[test]
+    fn external_mode_honors_proxy_addr() {
+        let mut p = external_test_policy();
+        apply_external_network_mode(&mut p, Some("10.0.0.5:8888"), Some("/x/ca.pem")).unwrap();
+        let proxy = p.network.proxy.expect("proxy set");
+        assert_eq!(proxy.http_addr.expect("addr").to_string(), "10.0.0.5:8888");
+    }
+
+    #[test]
+    fn external_mode_rejects_bad_proxy_addr() {
+        let mut p = external_test_policy();
+        let r = apply_external_network_mode(&mut p, Some("not-an-addr"), Some("/x/ca.pem"));
+        assert!(r.is_err());
+    }
 
     #[test]
     fn bundle_to_resolved_routes_converts_all_fields() {
