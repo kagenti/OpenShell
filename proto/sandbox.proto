@@ -13,6 +13,18 @@ package openshell.sandbox.v1;
 // - Public sandbox resource types live in `openshell.proto`.
 // - Internal compute-driver sandbox observation types live in `compute_driver.proto`.
 
+// Network enforcement strategy for sandbox isolation.
+enum NetworkEnforcementMode {
+  // Use a dedicated network namespace with veth pair and nftables bypass
+  // rules. Requires CAP_SYS_ADMIN and CAP_NET_ADMIN. Default.
+  NETWORK_ENFORCEMENT_NAMESPACE = 0;
+  // Rely on Kubernetes NetworkPolicy for L3/L4 egress control. The
+  // supervisor binds the CONNECT proxy to loopback instead of veth. No
+  // elevated capabilities required -- compatible with restricted-v2 SCC
+  // and restricted Pod Security Standard.
+  NETWORK_ENFORCEMENT_PLATFORM = 1;
+}
+
 // Sandbox security policy configuration.
 message SandboxPolicy {
   // Policy version.
@@ -25,6 +37,9 @@ message SandboxPolicy {
   ProcessPolicy process = 4;
   // Network access policies keyed by name (e.g. "claude_code", "gitlab").
   map<string, NetworkPolicyRule> network_policies = 5;
+  // Network enforcement mode. Default (0) preserves current namespace-based
+  // isolation for backward compatibility.
+  NetworkEnforcementMode network_enforcement = 6;
 }
 
 // Filesystem access policy.

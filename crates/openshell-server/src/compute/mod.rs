@@ -1271,6 +1271,14 @@ fn driver_sandbox_spec_from_public(spec: &SandboxSpec) -> DriverSandboxSpec {
         gpu: spec.gpu,
         gpu_device: spec.gpu_device.clone(),
         sandbox_token: String::new(),
+        // Clamp to known NetworkEnforcementMode values. Unknown values
+        // default to NAMESPACE (0) for safety -- elevated capabilities are
+        // the more conservative posture since the supervisor can always
+        // create a network namespace for full isolation.
+        network_enforcement: match spec.policy.as_ref().map_or(0, |p| p.network_enforcement) {
+            1 => 1, // PLATFORM
+            _ => 0, // NAMESPACE (default, reject unknown values)
+        },
     }
 }
 

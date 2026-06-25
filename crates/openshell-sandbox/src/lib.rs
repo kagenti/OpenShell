@@ -487,7 +487,10 @@ pub async fn run_sandbox(
 
     // Generate ephemeral CA and TLS state for HTTPS L7 inspection.
     // The CA cert is written to disk so sandbox processes can trust it.
-    let (tls_state, ca_file_paths) = if matches!(policy.network.mode, NetworkMode::Proxy) {
+    let (tls_state, ca_file_paths) = if matches!(
+        policy.network.mode,
+        NetworkMode::Proxy | NetworkMode::Platform
+    ) {
         match SandboxCa::generate() {
             Ok(ca) => {
                 let tls_dir = std::path::Path::new("/etc/openshell-tls");
@@ -600,79 +603,91 @@ pub async fn run_sandbox(
     // the entrypoint process's /proc/net/tcp for identity binding.
     let entrypoint_pid = Arc::new(AtomicU32::new(0));
 
-    let (_proxy, denial_rx, bypass_denial_tx, activity_rx, bypass_activity_tx) =
-        if matches!(policy.network.mode, NetworkMode::Proxy) {
-            let proxy_policy = policy.network.proxy.as_ref().ok_or_else(|| {
-                miette::miette!(
-                    "Network mode is set to proxy but no proxy configuration was provided"
-                )
-            })?;
+    let (_proxy, denial_rx, bypass_denial_tx, activity_rx, bypass_activity_tx) = if matches!(
+        policy.network.mode,
+        NetworkMode::Proxy | NetworkMode::Platform
+    ) {
+        let proxy_policy = policy.network.proxy.as_ref().ok_or_else(|| {
+            miette::miette!("Network mode is set to proxy but no proxy configuration was provided")
+        })?;
 
-            let engine = opa_engine.clone().ok_or_else(|| {
-                miette::miette!("Proxy mode requires an OPA engine (--rego-policy and --rego-data)")
-            })?;
+        let engine = opa_engine.clone().ok_or_else(|| {
+            miette::miette!("Proxy mode requires an OPA engine (--rego-policy and --rego-data)")
+        })?;
 
-            let cache = identity_cache.clone().ok_or_else(|| {
-                miette::miette!(
-                    "Proxy mode requires an identity cache (OPA engine must be configured)"
-                )
-            })?;
+        let cache = identity_cache.clone().ok_or_else(|| {
+            miette::miette!("Proxy mode requires an identity cache (OPA engine must be configured)")
+        })?;
 
-            // If we have a network namespace, bind to the veth host IP so sandboxed
-            // processes can reach the proxy via TCP.
-            #[cfg(target_os = "linux")]
-            let bind_addr = netns.as_ref().map(|ns| {
+        // If we have a network namespace, bind to the veth host IP so sandboxed
+        // processes can reach the proxy via TCP.
+        #[cfg(target_os = "linux")]
+        let bind_addr = netns.as_ref().map(|ns| {
+            let port = proxy_policy.http_addr.map_or(3128, |addr| addr.port());
+            SocketAddr::new(ns.host_ip(), port)
+        });
+
+        // Platform mode: no netns, bind proxy to loopback.
+        #[cfg(target_os = "linux")]
+        let bind_addr = bind_addr.or_else(|| {
+            if matches!(policy.network.mode, NetworkMode::Platform) {
                 let port = proxy_policy.http_addr.map_or(3128, |addr| addr.port());
-                SocketAddr::new(ns.host_ip(), port)
-            });
-
-            #[cfg(not(target_os = "linux"))]
-            let bind_addr: Option<SocketAddr> = None;
-
-            // Build inference context for local routing of intercepted inference calls.
-            let inference_ctx = build_inference_context(
-                sandbox_id.as_deref(),
-                openshell_endpoint_for_proxy.as_deref(),
-                inference_routes.as_deref(),
-            )
-            .await?;
-
-            // Create denial aggregator channel if in gRPC mode (sandbox_id present).
-            // Clone the sender for the bypass monitor before passing to the proxy.
-            let (denial_tx, denial_rx, bypass_denial_tx) = if sandbox_id.is_some() {
-                let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-                let bypass_tx = tx.clone();
-                (Some(tx), Some(rx), Some(bypass_tx))
+                Some(SocketAddr::new(
+                    std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                    port,
+                ))
             } else {
-                (None, None, None)
-            };
-            let (activity_tx, activity_rx, bypass_activity_tx) =
-                activity_collection_channels(sandbox_id.as_deref());
+                None
+            }
+        });
 
-            let proxy_handle = ProxyHandle::start_with_bind_addr(
-                proxy_policy,
-                bind_addr,
-                engine,
-                cache,
-                entrypoint_pid.clone(),
-                tls_state,
-                inference_ctx,
-                Some(provider_credentials.clone()),
-                Some(policy_local_ctx.clone()),
-                denial_tx,
-                activity_tx,
-            )
-            .await?;
-            (
-                Some(proxy_handle),
-                denial_rx,
-                bypass_denial_tx,
-                activity_rx,
-                bypass_activity_tx,
-            )
+        #[cfg(not(target_os = "linux"))]
+        let bind_addr: Option<SocketAddr> = None;
+
+        // Build inference context for local routing of intercepted inference calls.
+        let inference_ctx = build_inference_context(
+            sandbox_id.as_deref(),
+            openshell_endpoint_for_proxy.as_deref(),
+            inference_routes.as_deref(),
+        )
+        .await?;
+
+        // Create denial aggregator channel if in gRPC mode (sandbox_id present).
+        // Clone the sender for the bypass monitor before passing to the proxy.
+        let (denial_tx, denial_rx, bypass_denial_tx) = if sandbox_id.is_some() {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let bypass_tx = tx.clone();
+            (Some(tx), Some(rx), Some(bypass_tx))
         } else {
-            (None, None, None, None, None)
+            (None, None, None)
         };
+        let (activity_tx, activity_rx, bypass_activity_tx) =
+            activity_collection_channels(sandbox_id.as_deref());
+
+        let proxy_handle = ProxyHandle::start_with_bind_addr(
+            proxy_policy,
+            bind_addr,
+            engine,
+            cache,
+            entrypoint_pid.clone(),
+            tls_state,
+            inference_ctx,
+            Some(provider_credentials.clone()),
+            Some(policy_local_ctx.clone()),
+            denial_tx,
+            activity_tx,
+        )
+        .await?;
+        (
+            Some(proxy_handle),
+            denial_rx,
+            bypass_denial_tx,
+            activity_rx,
+            bypass_activity_tx,
+        )
+    } else {
+        (None, None, None, None, None)
+    };
 
     // Spawn bypass detection monitor (Linux only, proxy mode only).
     // Reads /dev/kmsg for nftables log entries and emits structured
@@ -705,18 +720,30 @@ pub async fn run_sandbox(
     #[cfg(not(target_os = "linux"))]
     let ssh_netns_fd: Option<i32> = None;
 
-    let ssh_proxy_url = if matches!(policy.network.mode, NetworkMode::Proxy) {
+    let ssh_proxy_url = if matches!(
+        policy.network.mode,
+        NetworkMode::Proxy | NetworkMode::Platform
+    ) {
         #[cfg(target_os = "linux")]
         {
-            netns.as_ref().map(|ns| {
+            if let Some(ns) = netns.as_ref() {
                 let port = policy
                     .network
                     .proxy
                     .as_ref()
                     .and_then(|p| p.http_addr)
                     .map_or(3128, |addr| addr.port());
-                format!("http://{}:{port}", ns.host_ip())
-            })
+                Some(format!("http://{}:{port}", ns.host_ip()))
+            } else {
+                // Platform mode: proxy on loopback
+                let port = policy
+                    .network
+                    .proxy
+                    .as_ref()
+                    .and_then(|p| p.http_addr)
+                    .map_or(3128, |addr| addr.port());
+                Some(format!("http://127.0.0.1:{port}"))
+            }
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -1729,8 +1756,10 @@ where
 }
 
 fn enrich_sandbox_baseline_paths(policy: &mut SandboxPolicy) {
-    let (ro, rw) =
-        active_baseline_enrichment_paths(matches!(policy.network.mode, NetworkMode::Proxy));
+    let (ro, rw) = active_baseline_enrichment_paths(matches!(
+        policy.network.mode,
+        NetworkMode::Proxy | NetworkMode::Platform
+    ));
     let modified = enrich_sandbox_baseline_paths_with(policy, &ro, &rw, std::path::Path::exists);
 
     if modified {

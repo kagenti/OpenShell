@@ -378,6 +378,7 @@ fn to_proto(raw: PolicyFile) -> SandboxPolicy {
             run_as_group: p.run_as_group,
         }),
         network_policies,
+        network_enforcement: 0,
     }
 }
 
@@ -649,6 +650,7 @@ pub fn restrictive_default_policy() -> SandboxPolicy {
             run_as_group: "sandbox".into(),
         }),
         network_policies: HashMap::new(),
+        network_enforcement: 0, // NAMESPACE (default)
     }
 }
 
@@ -1262,6 +1264,7 @@ network_policies:
             filesystem: None,
             landlock: None,
             network_policies: HashMap::new(),
+            network_enforcement: 0,
         };
         assert!(validate_sandbox_policy(&policy).is_ok());
     }

@@ -5,7 +5,8 @@
 
 use openshell_core::proto::{
     FilesystemPolicy as ProtoFilesystemPolicy, LandlockPolicy as ProtoLandlockPolicy,
-    ProcessPolicy as ProtoProcessPolicy, SandboxPolicy as ProtoSandboxPolicy,
+    NetworkEnforcementMode, ProcessPolicy as ProtoProcessPolicy,
+    SandboxPolicy as ProtoSandboxPolicy,
 };
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -62,6 +63,9 @@ pub enum NetworkMode {
     Block,
     Proxy,
     Allow,
+    /// Platform mode: Landlock + seccomp + loopback proxy, no network namespace.
+    /// Compatible with restricted-v2 SCC and restricted Pod Security Standard.
+    Platform,
 }
 
 #[derive(Debug, Clone)]
@@ -99,10 +103,13 @@ impl TryFrom<ProtoSandboxPolicy> for SandboxPolicy {
     type Error = miette::Report;
 
     fn try_from(proto: ProtoSandboxPolicy) -> Result<Self, Self::Error> {
-        // In cluster mode we always run with proxy networking so all egress
-        // can be evaluated by OPA and `inference.local` is always addressable.
+        let mode = match proto.network_enforcement() {
+            NetworkEnforcementMode::NetworkEnforcementNamespace => NetworkMode::Proxy,
+            NetworkEnforcementMode::NetworkEnforcementPlatform => NetworkMode::Platform,
+        };
+
         let network = NetworkPolicy {
-            mode: NetworkMode::Proxy,
+            mode,
             proxy: Some(ProxyPolicy { http_addr: None }),
         };
 

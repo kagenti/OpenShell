@@ -226,27 +226,25 @@ impl ProcessHandle {
             cmd.current_dir(dir);
         }
 
-        if matches!(policy.network.mode, NetworkMode::Proxy) {
+        if matches!(
+            policy.network.mode,
+            NetworkMode::Proxy | NetworkMode::Platform
+        ) {
             let proxy = policy.network.proxy.as_ref().ok_or_else(|| {
                 miette::miette!(
                     "Network mode is set to proxy but no proxy configuration was provided"
                 )
             })?;
-            // When using network namespace, set proxy URL to the veth host IP
-            if netns_fd.is_some() {
-                // The proxy is on 10.200.0.1:3128 (or configured port)
-                let port = proxy.http_addr.map_or(3128, |addr| addr.port());
-                let proxy_url = format!("http://10.200.0.1:{port}");
-                // Both uppercase and lowercase variants: curl/wget use uppercase,
-                // gRPC C-core (libgrpc) checks lowercase http_proxy/https_proxy.
-                for (key, value) in child_env::proxy_env_vars(&proxy_url) {
-                    cmd.env(key, value);
-                }
-            } else if let Some(http_addr) = proxy.http_addr {
-                let proxy_url = format!("http://{http_addr}");
-                for (key, value) in child_env::proxy_env_vars(&proxy_url) {
-                    cmd.env(key, value);
-                }
+            let port = proxy.http_addr.map_or(3128, |addr| addr.port());
+            let proxy_url = if netns_fd.is_some() {
+                // Namespace mode: proxy on veth host IP
+                format!("http://10.200.0.1:{port}")
+            } else {
+                // Platform mode (or non-Linux): proxy on loopback
+                format!("http://127.0.0.1:{port}")
+            };
+            for (key, value) in child_env::proxy_env_vars(&proxy_url) {
+                cmd.env(key, value);
             }
         }
 
@@ -368,17 +366,19 @@ impl ProcessHandle {
             cmd.current_dir(dir);
         }
 
-        if matches!(policy.network.mode, NetworkMode::Proxy) {
+        if matches!(
+            policy.network.mode,
+            NetworkMode::Proxy | NetworkMode::Platform
+        ) {
             let proxy = policy.network.proxy.as_ref().ok_or_else(|| {
                 miette::miette!(
                     "Network mode is set to proxy but no proxy configuration was provided"
                 )
             })?;
-            if let Some(http_addr) = proxy.http_addr {
-                let proxy_url = format!("http://{http_addr}");
-                for (key, value) in child_env::proxy_env_vars(&proxy_url) {
-                    cmd.env(key, value);
-                }
+            let port = proxy.http_addr.map_or(3128, |addr| addr.port());
+            let proxy_url = format!("http://127.0.0.1:{port}");
+            for (key, value) in child_env::proxy_env_vars(&proxy_url) {
+                cmd.env(key, value);
             }
         }
 

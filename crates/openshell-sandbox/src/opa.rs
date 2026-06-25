@@ -1262,6 +1262,7 @@ mod tests {
                 run_as_group: "sandbox".to_string(),
             }),
             network_policies,
+            network_enforcement: 0,
         }
     }
 
@@ -2518,6 +2519,7 @@ network_policies:
                 run_as_group: "sandbox".to_string(),
             }),
             network_policies,
+            network_enforcement: 0,
         };
 
         let engine = OpaEngine::from_proto(&proto).expect("engine from proto");
@@ -2641,6 +2643,7 @@ network_policies:
                 run_as_group: "sandbox".to_string(),
             }),
             network_policies,
+            network_enforcement: 0,
         };
 
         let engine = OpaEngine::from_proto(&proto).expect("engine from proto");
@@ -2698,6 +2701,7 @@ network_policies:
                 run_as_group: "sandbox".to_string(),
             }),
             network_policies,
+            network_enforcement: 0,
         };
 
         let engine = OpaEngine::from_proto(&proto).expect("engine from proto");
@@ -2755,6 +2759,7 @@ network_policies:
                 run_as_group: "sandbox".to_string(),
             }),
             network_policies,
+            network_enforcement: 0,
         };
 
         let engine = OpaEngine::from_proto(&proto).expect("engine from proto");
@@ -3704,6 +3709,7 @@ process:
                 run_as_group: "sandbox".to_string(),
             }),
             network_policies,
+            network_enforcement: 0,
         };
         let engine = OpaEngine::from_proto(&proto).expect("engine from proto");
         let input = NetworkInput {
@@ -3758,6 +3764,7 @@ process:
                 run_as_group: "sandbox".to_string(),
             }),
             network_policies,
+            network_enforcement: 0,
         };
         let engine = OpaEngine::from_proto(&proto).expect("engine from proto");
         let input = NetworkInput {
@@ -3828,6 +3835,7 @@ process:
                 run_as_group: "sandbox".to_string(),
             }),
             network_policies,
+            network_enforcement: 0,
         };
         let engine = OpaEngine::from_proto(&proto).expect("Failed to create engine from proto");
 
@@ -4058,6 +4066,7 @@ network_policies:
                 run_as_group: "sandbox".to_string(),
             }),
             network_policies,
+            network_enforcement: 0,
         };
         let engine = OpaEngine::from_proto(&proto).unwrap();
         // Port 443
@@ -5017,6 +5026,7 @@ network_policies:
                 run_as_group: "sandbox".to_string(),
             }),
             network_policies,
+            network_enforcement: 0,
         };
 
         // Build engine with our PID (symlink resolution will work via /proc/self/root/)
@@ -5094,6 +5104,7 @@ network_policies:
                 run_as_group: "sandbox".to_string(),
             }),
             network_policies,
+            network_enforcement: 0,
         };
 
         // Initial load at pid=0 — no symlink expansion

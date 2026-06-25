@@ -330,9 +330,31 @@ impl KubernetesComputeDriver {
             enable_user_namespaces: self.config.enable_user_namespaces,
             workspace_default_storage_size: &self.config.workspace_default_storage_size,
             sa_token_ttl_secs: self.config.effective_sa_token_ttl_secs(),
+            is_platform_mode: sandbox
+                .spec
+                .as_ref()
+                .is_some_and(|s| s.network_enforcement == 1),
         };
         obj.data = sandbox_to_k8s_spec(sandbox.spec.as_ref(), &params);
         let api = self.api();
+
+        // Platform mode: emit a deny-all egress NetworkPolicy for this sandbox.
+        // Loopback traffic (to the in-pod proxy on 127.0.0.1:3128) is unaffected
+        // by NetworkPolicy. This closes the Landlock port-not-IP gap where
+        // connect(other-pod:3128) would bypass the sandbox's OPA policy.
+        if params.is_platform_mode {
+            if let Err(e) = self
+                .create_sandbox_network_policy(name, &sandbox.id)
+                .await
+            {
+                warn!(
+                    sandbox_id = %sandbox.id,
+                    error = %e,
+                    "Failed to create egress NetworkPolicy for platform-mode sandbox \
+                     (sandbox will rely on Landlock + seccomp only)"
+                );
+            }
+        }
 
         match tokio::time::timeout(KUBE_API_TIMEOUT, api.create(&PostParams::default(), &obj)).await
         {
@@ -365,6 +387,67 @@ impl KubernetesComputeDriver {
                     KUBE_API_TIMEOUT.as_secs()
                 )))
             }
+        }
+    }
+
+    /// Create a deny-all egress NetworkPolicy for a platform-mode sandbox pod.
+    ///
+    /// The policy selects the specific sandbox pod by its `openshell.ai/sandbox-id`
+    /// label and denies all egress. Loopback traffic (127.0.0.1:3128 to the
+    /// in-pod CONNECT proxy) is unaffected by Kubernetes NetworkPolicy.
+    async fn create_sandbox_network_policy(
+        &self,
+        sandbox_name: &str,
+        sandbox_id: &str,
+    ) -> Result<(), KubernetesDriverError> {
+        let np_name = format!("{sandbox_name}-egress");
+        let np = serde_json::json!({
+            "apiVersion": "networking.k8s.io/v1",
+            "kind": "NetworkPolicy",
+            "metadata": {
+                "name": np_name,
+                "namespace": self.config.namespace,
+                "labels": {
+                    "openshell.ai/managed-by": "openshell",
+                    "openshell.ai/sandbox-id": sandbox_id,
+                },
+            },
+            "spec": {
+                "podSelector": {
+                    "matchLabels": {
+                        "openshell.ai/sandbox-id": sandbox_id,
+                    },
+                },
+                "policyTypes": ["Egress"],
+                "egress": [],
+            },
+        });
+
+        let gvk = GroupVersionKind::gvk("networking.k8s.io", "v1", "NetworkPolicy");
+        let resource = ApiResource::from_gvk(&gvk);
+        let api: Api<DynamicObject> =
+            Api::namespaced_with(self.client.clone(), &self.config.namespace, &resource);
+        let obj = serde_json::from_value::<DynamicObject>(np)
+            .map_err(|e| KubernetesDriverError::Message(format!("NetworkPolicy serialization: {e}")))?;
+
+        match tokio::time::timeout(KUBE_API_TIMEOUT, api.create(&PostParams::default(), &obj)).await
+        {
+            Ok(Ok(_)) => {
+                info!(
+                    sandbox_id = %sandbox_id,
+                    policy = %np_name,
+                    "Created deny-all egress NetworkPolicy for platform-mode sandbox"
+                );
+                Ok(())
+            }
+            Ok(Err(KubeError::Api(err))) if err.code == 409 => {
+                debug!(policy = %np_name, "NetworkPolicy already exists");
+                Ok(())
+            }
+            Ok(Err(err)) => Err(KubernetesDriverError::from_kube(err)),
+            Err(_) => Err(KubernetesDriverError::Message(
+                "timed out creating NetworkPolicy".into(),
+            )),
         }
     }
 
@@ -823,6 +906,7 @@ fn apply_supervisor_sideload(
     supervisor_image: &str,
     supervisor_image_pull_policy: &str,
     method: SupervisorSideloadMethod,
+    is_platform_mode: bool,
 ) {
     let Some(spec) = pod_template.get_mut("spec").and_then(|v| v.as_object_mut()) else {
         return;
@@ -882,16 +966,16 @@ fn apply_supervisor_sideload(
             serde_json::json!([format!("{}/openshell-sandbox", SUPERVISOR_MOUNT_PATH)]),
         );
 
-        // Force the supervisor to run as root (UID 0). Sandbox images may set
-        // a non-root USER directive (e.g. `USER sandbox`), but the supervisor
-        // needs root to create network namespaces, set up the proxy, and
-        // configure Landlock/seccomp. The supervisor itself drops privileges
-        // for child processes via the policy's `run_as_user`/`run_as_group`.
-        let security_context = container
-            .entry("securityContext")
-            .or_insert_with(|| serde_json::json!({}));
-        if let Some(sc) = security_context.as_object_mut() {
-            sc.insert("runAsUser".to_string(), serde_json::json!(0));
+        // In namespace mode, force root (UID 0) so the supervisor can create
+        // network namespaces and drop privileges for child processes.
+        // In platform mode, keep the image's default non-root user.
+        if !is_platform_mode {
+            let security_context = container
+                .entry("securityContext")
+                .or_insert_with(|| serde_json::json!({}));
+            if let Some(sc) = security_context.as_object_mut() {
+                sc.insert("runAsUser".to_string(), serde_json::json!(0));
+            }
         }
 
         // Add volume mount
@@ -1044,6 +1128,10 @@ struct SandboxPodParams<'a> {
     /// Lifetime (seconds) of the projected `ServiceAccount` token used
     /// for the bootstrap `IssueSandboxToken` exchange.
     sa_token_ttl_secs: i64,
+    /// Platform network enforcement mode (Issue #899). When true, sandbox
+    /// pods are emitted without elevated capabilities, compatible with
+    /// restricted-v2 SCC and restricted Pod Security Standard.
+    is_platform_mode: bool,
 }
 
 impl Default for SandboxPodParams<'_> {
@@ -1065,6 +1153,7 @@ impl Default for SandboxPodParams<'_> {
             enable_user_namespaces: false,
             workspace_default_storage_size: DEFAULT_WORKSPACE_STORAGE_SIZE,
             sa_token_ttl_secs: 3600,
+            is_platform_mode: false,
         }
     }
 }
@@ -1233,6 +1322,18 @@ fn sandbox_template_to_k8s(
         serde_json::json!(false),
     );
 
+    // Platform mode: share the PID namespace between supervisor and agent
+    // containers so the proxy can resolve process identity via /proc/<pid>/exe
+    // without CAP_SYS_PTRACE. Same-PID-namespace /proc reads work for
+    // same-UID processes; cross-UID reads work because the supervisor runs
+    // as the pod's non-root user alongside the agent.
+    if params.is_platform_mode {
+        spec.insert(
+            "shareProcessNamespace".to_string(),
+            serde_json::json!(true),
+        );
+    }
+
     let mut container = serde_json::Map::new();
     container.insert("name".to_string(), serde_json::json!("agent"));
     // Use template image if provided, otherwise fall back to default
@@ -1265,22 +1366,32 @@ fn sandbox_template_to_k8s(
 
     container.insert("env".to_string(), serde_json::Value::Array(env));
 
-    let mut capabilities: Vec<&str> = vec!["SYS_ADMIN", "NET_ADMIN", "SYS_PTRACE", "SYSLOG"];
-    if use_user_namespaces {
-        // In a user namespace the bounding set is reset. SETUID/SETGID are
-        // needed for the supervisor to drop privileges to the sandbox user.
-        // DAC_READ_SEARCH is needed for cross-UID /proc/<pid>/fd/ access
-        // for process identity resolution in network policy enforcement.
-        capabilities.extend(["SETUID", "SETGID", "DAC_READ_SEARCH"]);
+    if params.is_platform_mode {
+        // Platform mode: zero elevated capabilities. Compatible with
+        // restricted-v2 SCC and restricted Pod Security Standard.
+        container.insert(
+            "securityContext".to_string(),
+            serde_json::json!({
+                "allowPrivilegeEscalation": false,
+                "capabilities": {
+                    "drop": ["ALL"]
+                }
+            }),
+        );
+    } else {
+        let mut capabilities: Vec<&str> = vec!["SYS_ADMIN", "NET_ADMIN", "SYS_PTRACE", "SYSLOG"];
+        if use_user_namespaces {
+            capabilities.extend(["SETUID", "SETGID", "DAC_READ_SEARCH"]);
+        }
+        container.insert(
+            "securityContext".to_string(),
+            serde_json::json!({
+                "capabilities": {
+                    "add": capabilities
+                }
+            }),
+        );
     }
-    container.insert(
-        "securityContext".to_string(),
-        serde_json::json!({
-            "capabilities": {
-                "add": capabilities
-            }
-        }),
-    );
 
     // Mount client TLS secret for mTLS to the server, plus the projected
     // ServiceAccount token used to bootstrap the sandbox's gateway JWT
@@ -1363,6 +1474,7 @@ fn sandbox_template_to_k8s(
         params.supervisor_image,
         params.supervisor_image_pull_policy,
         params.supervisor_sideload_method,
+        params.is_platform_mode,
     );
 
     // Inject workspace persistence (init container + PVC volume mount) so
@@ -1750,6 +1862,7 @@ mod tests {
             "custom-image:latest",
             "IfNotPresent",
             SupervisorSideloadMethod::InitContainer,
+            false,
         );
 
         let sc = &pod_template["spec"]["containers"][0]["securityContext"];
@@ -1779,6 +1892,7 @@ mod tests {
             "supervisor-image:latest",
             "IfNotPresent",
             SupervisorSideloadMethod::InitContainer,
+            false,
         );
 
         let sc = &pod_template["spec"]["containers"][0]["securityContext"];
@@ -1804,6 +1918,7 @@ mod tests {
             "supervisor-image:latest",
             "IfNotPresent",
             SupervisorSideloadMethod::InitContainer,
+            false,
         );
 
         // Volume should be an emptyDir
@@ -1878,6 +1993,7 @@ mod tests {
             "supervisor-image:latest",
             "IfNotPresent",
             SupervisorSideloadMethod::ImageVolume,
+            false,
         );
 
         let volumes = pod_template["spec"]["volumes"]
@@ -1932,6 +2048,7 @@ mod tests {
             "supervisor-image:latest",
             "",
             SupervisorSideloadMethod::ImageVolume,
+            false,
         );
 
         let volume = &pod_template["spec"]["volumes"][0];

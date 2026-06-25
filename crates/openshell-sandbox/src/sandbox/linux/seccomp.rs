@@ -70,8 +70,12 @@ pub fn apply_supervisor_prelude() -> Result<()> {
 }
 
 pub fn apply(policy: &SandboxPolicy) -> Result<()> {
-    let allow_inet = matches!(policy.network.mode, NetworkMode::Proxy | NetworkMode::Allow);
-    let main_filter = build_filter(allow_inet)?;
+    let allow_inet = matches!(
+        policy.network.mode,
+        NetworkMode::Proxy | NetworkMode::Allow | NetworkMode::Platform
+    );
+    let block_udp = matches!(policy.network.mode, NetworkMode::Platform);
+    let main_filter = build_filter(allow_inet, block_udp)?;
     let clone3_filter = build_clone3_filter()?;
 
     set_no_new_privs()?;
@@ -80,8 +84,8 @@ pub fn apply(policy: &SandboxPolicy) -> Result<()> {
     Ok(())
 }
 
-fn build_filter(allow_inet: bool) -> Result<seccompiler::BpfProgram> {
-    let rules = build_filter_rules(allow_inet)?;
+fn build_filter(allow_inet: bool, block_udp: bool) -> Result<seccompiler::BpfProgram> {
+    let rules = build_filter_rules(allow_inet, block_udp)?;
     compile_filter(rules, SeccompAction::Errno(libc::EPERM as u32))
 }
 
@@ -181,7 +185,10 @@ fn apply_runtime_filters(
     Ok(())
 }
 
-fn build_filter_rules(allow_inet: bool) -> Result<BTreeMap<i64, Vec<SeccompRule>>> {
+fn build_filter_rules(
+    allow_inet: bool,
+    block_udp: bool,
+) -> Result<BTreeMap<i64, Vec<SeccompRule>>> {
     let mut rules: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::new();
 
     // --- Socket domain blocks ---
@@ -200,6 +207,21 @@ fn build_filter_rules(allow_inet: bool) -> Result<BTreeMap<i64, Vec<SeccompRule>
     for domain in blocked_domains {
         debug!(domain, "Blocking socket domain via seccomp");
         add_socket_domain_rule(&mut rules, domain)?;
+    }
+
+    // Block UDP sockets (SOCK_DGRAM) on AF_INET/AF_INET6.
+    //
+    // The agent doesn't need UDP: all traffic goes through the CONNECT proxy
+    // on 127.0.0.1:3128, which resolves DNS on behalf of the agent. This
+    // matches Full OpenShell behavior where nftables rejects all UDP in the
+    // network namespace (nft_ruleset.rs:48-49 has no UDP accept rule).
+    //
+    // Without this block, an agent could exfiltrate data via DNS tunneling
+    // (encoding secrets in DNS subdomain labels) or send UDP packets to
+    // arbitrary destinations -- Landlock ABI v4 only covers TCP.
+    if block_udp {
+        add_sock_dgram_block(&mut rules, libc::AF_INET)?;
+        add_sock_dgram_block(&mut rules, libc::AF_INET6)?;
     }
 
     // Allow AF_NETLINK only for NETLINK_ROUTE (protocol 0).
@@ -339,6 +361,29 @@ fn add_netlink_non_route_rule(rules: &mut BTreeMap<i64, Vec<SeccompRule>>) -> Re
     Ok(())
 }
 
+/// Block `socket(domain, SOCK_DGRAM, *)` to prevent UDP socket creation.
+///
+/// Uses `MaskedEq` on arg1 with mask `0xF` (SOCK_TYPE_MASK) to match
+/// `SOCK_DGRAM` (2) regardless of `SOCK_NONBLOCK` or `SOCK_CLOEXEC` flags.
+#[allow(clippy::cast_sign_loss)]
+fn add_sock_dgram_block(rules: &mut BTreeMap<i64, Vec<SeccompRule>>, domain: i32) -> Result<()> {
+    let domain_condition =
+        SeccompCondition::new(0, SeccompCmpArgLen::Dword, SeccompCmpOp::Eq, domain as u64)
+            .into_diagnostic()?;
+
+    let type_condition = SeccompCondition::new(
+        1, // type argument
+        SeccompCmpArgLen::Dword,
+        SeccompCmpOp::MaskedEq(0xF), // SOCK_TYPE_MASK
+        libc::SOCK_DGRAM as u64,
+    )
+    .into_diagnostic()?;
+
+    let rule = SeccompRule::new(vec![domain_condition, type_condition]).into_diagnostic()?;
+    rules.entry(libc::SYS_socket).or_default().push(rule);
+    Ok(())
+}
+
 /// Block a syscall when a specific bit pattern is set in an argument.
 ///
 /// Uses `MaskedEq` to check `(arg & flag_bit) == flag_bit`, which triggers
@@ -379,14 +424,14 @@ mod tests {
 
     #[test]
     fn build_filter_proxy_mode_compiles() {
-        let filter = build_filter(true);
-        assert!(filter.is_ok(), "build_filter(true) should succeed");
+        let filter = build_filter(true, false);
+        assert!(filter.is_ok(), "build_filter(true, false) should succeed");
     }
 
     #[test]
     fn build_filter_block_mode_compiles() {
-        let filter = build_filter(false);
-        assert!(filter.is_ok(), "build_filter(false) should succeed");
+        let filter = build_filter(false, false);
+        assert!(filter.is_ok(), "build_filter(false, false) should succeed");
     }
 
     #[test]
@@ -417,7 +462,7 @@ mod tests {
     #[test]
     fn unconditional_blocks_present_in_filter() {
         // Build a real filter and verify all unconditional blocks are present.
-        let filter_rules = build_filter_rules(true).unwrap();
+        let filter_rules = build_filter_rules(true, false).unwrap();
 
         // Unconditional blocks have an empty Vec (no conditions = always match).
         let expected = [
@@ -460,7 +505,7 @@ mod tests {
     fn conditional_blocks_have_rules() {
         // Build a real filter and verify the conditional syscalls have rule entries
         // (non-empty Vec means conditional match).
-        let filter_rules = build_filter_rules(true).unwrap();
+        let filter_rules = build_filter_rules(true, false).unwrap();
 
         for syscall in [
             libc::SYS_execveat,
@@ -485,7 +530,7 @@ mod tests {
         // AF_NETLINK+non-ROUTE filter), but it must NOT be an unconditional block
         // (empty Vec). An empty Vec would block ALL socket() calls, including
         // socket(AF_NETLINK, *, NETLINK_ROUTE=0) which getifaddrs(3) needs.
-        let filter_rules = build_filter_rules(true).unwrap();
+        let filter_rules = build_filter_rules(true, false).unwrap();
 
         assert!(
             filter_rules.contains_key(&libc::SYS_socket),
@@ -560,7 +605,7 @@ mod tests {
     #[test]
     fn clone3_not_in_main_filter() {
         // clone3 must NOT be in the main filter; it has its own ENOSYS filter.
-        let filter_rules = build_filter_rules(true).unwrap();
+        let filter_rules = build_filter_rules(true, false).unwrap();
         assert!(
             !filter_rules.contains_key(&libc::SYS_clone3),
             "clone3 should not be in the main filter — it uses a separate ENOSYS filter"
@@ -623,37 +668,37 @@ mod tests {
 
     #[test]
     fn behavioral_memfd_create_blocked() {
-        let filter = build_filter(true).unwrap();
+        let filter = build_filter(true, false).unwrap();
         unsafe { assert_blocked_in_child(&filter, libc::SYS_memfd_create, libc::EPERM) };
     }
 
     #[test]
     fn behavioral_ptrace_blocked() {
-        let filter = build_filter(true).unwrap();
+        let filter = build_filter(true, false).unwrap();
         unsafe { assert_blocked_in_child(&filter, libc::SYS_ptrace, libc::EPERM) };
     }
 
     #[test]
     fn behavioral_process_vm_writev_blocked() {
-        let filter = build_filter(true).unwrap();
+        let filter = build_filter(true, false).unwrap();
         unsafe { assert_blocked_in_child(&filter, libc::SYS_process_vm_writev, libc::EPERM) };
     }
 
     #[test]
     fn behavioral_userfaultfd_blocked() {
-        let filter = build_filter(true).unwrap();
+        let filter = build_filter(true, false).unwrap();
         unsafe { assert_blocked_in_child(&filter, libc::SYS_userfaultfd, libc::EPERM) };
     }
 
     #[test]
     fn behavioral_perf_event_open_blocked() {
-        let filter = build_filter(true).unwrap();
+        let filter = build_filter(true, false).unwrap();
         unsafe { assert_blocked_in_child(&filter, libc::SYS_perf_event_open, libc::EPERM) };
     }
 
     #[test]
     fn behavioral_setns_blocked() {
-        let filter = build_filter(true).unwrap();
+        let filter = build_filter(true, false).unwrap();
         unsafe { assert_blocked_in_child(&filter, libc::SYS_setns, libc::EPERM) };
     }
 
@@ -701,7 +746,7 @@ mod tests {
     fn behavioral_clone3_returns_enosys() {
         // clone3 uses a separate filter that returns ENOSYS (not EPERM) so
         // glibc falls back to clone.
-        let main_filter = build_filter(true).unwrap();
+        let main_filter = build_filter(true, false).unwrap();
         let clone3_filter = build_clone3_filter().unwrap();
         // Apply in the same order as apply(): clone3 filter first, main filter second.
         let pid = unsafe { libc::fork() };
@@ -730,7 +775,7 @@ mod tests {
 
     #[test]
     fn behavioral_third_filter_install_blocked_after_startup() {
-        let main_filter = build_filter(true).unwrap();
+        let main_filter = build_filter(true, false).unwrap();
         let clone3_filter = build_clone3_filter().unwrap();
         let third_filter = build_clone3_filter().unwrap();
 
@@ -772,7 +817,7 @@ mod tests {
     fn behavioral_netlink_route_allowed() {
         // socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE=0) must succeed (not blocked).
         // This is the call getifaddrs(3) makes on Linux to enumerate interfaces.
-        let filter = build_filter(true).unwrap();
+        let filter = build_filter(true, false).unwrap();
         let pid = unsafe { libc::fork() };
         assert!(pid >= 0, "fork failed");
         if pid == 0 {
@@ -807,7 +852,7 @@ mod tests {
         // socket(AF_NETLINK, SOCK_RAW, NETLINK_SOCK_DIAG=4) must be blocked.
         // NETLINK_SOCK_DIAG is representative of non-ROUTE netlink protocols
         // that have no legitimate use inside the sandbox.
-        let filter = build_filter(true).unwrap();
+        let filter = build_filter(true, false).unwrap();
         let pid = unsafe { libc::fork() };
         assert!(pid >= 0, "fork failed");
         if pid == 0 {

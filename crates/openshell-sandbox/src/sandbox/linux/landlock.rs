@@ -3,10 +3,10 @@
 
 //! Landlock filesystem sandboxing.
 
-use crate::policy::{LandlockCompatibility, SandboxPolicy};
+use crate::policy::{LandlockCompatibility, NetworkMode, SandboxPolicy};
 use landlock::{
     ABI, Access, AccessFs, CompatLevel, Compatible, PathBeneath, PathFd, PathFdError, Ruleset,
-    RulesetAttr, RulesetCreatedAttr,
+    RulesetAttr, RulesetCreatedAttr, Scope,
 };
 use miette::{IntoDiagnostic, Result};
 use std::path::{Path, PathBuf};
@@ -115,7 +115,8 @@ pub fn prepare(policy: &SandboxPolicy, workdir: Option<&str>) -> Result<Option<P
         }
     }
 
-    if read_only.is_empty() && read_write.is_empty() {
+    let is_platform = matches!(policy.network.mode, NetworkMode::Platform);
+    if read_only.is_empty() && read_write.is_empty() && !is_platform {
         return Ok(None);
     }
 
@@ -184,6 +185,19 @@ pub fn prepare(policy: &SandboxPolicy, workdir: Option<&str>) -> Result<Option<P
             .handle_access(access_all)
             .into_diagnostic()?;
 
+        // Platform mode: restrict abstract Unix sockets and signals.
+        // Without a network namespace, abstract Unix sockets in the pod
+        // are visible to the agent. This scope prevents connecting to
+        // abstract sockets created outside this Landlock domain and
+        // sending signals to the supervisor process.
+        // BestEffort: silently ignored on kernels without ABI v5+.
+        if matches!(policy.network.mode, NetworkMode::Platform) {
+            ruleset = ruleset
+                .scope(Scope::AbstractUnixSocket)
+                .into_diagnostic()?;
+            ruleset = ruleset.scope(Scope::Signal).into_diagnostic()?;
+        }
+
         let mut ruleset = ruleset.create().into_diagnostic()?;
         let mut rules_applied: usize = 0;
 
@@ -215,7 +229,7 @@ pub fn prepare(policy: &SandboxPolicy, workdir: Option<&str>) -> Result<Option<P
             ));
         }
 
-        let skipped = total_paths - rules_applied;
+        let skipped = total_paths.saturating_sub(rules_applied);
         openshell_ocsf::ocsf_emit!(
             openshell_ocsf::ConfigStateChangeBuilder::new(crate::ocsf_ctx())
                 .severity(openshell_ocsf::SeverityId::Informational)
