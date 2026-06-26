@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# AuthBridge proxy-sidecar config for the OpenShell NetworkMode::External integration.
+# Mounted into the sidecar at /etc/authbridge/config.yaml by 02-setup-authbridge.sh.
+mode: proxy-sidecar
+listener:
+  forward_proxy_addr: "0.0.0.0:3128"            # the sandbox reaches this at the veth host IP 10.200.0.1:3128
+  reverse_proxy_backend: "http://127.0.0.1:1"   # required by config validation; never dialed
+  session_api_addr: ":9094"                      # the session API abctl connects to (localhost-bound)
+tls_bridge:
+  mode: enabled
+  ca_dir: /etc/authbridge-ca                     # tls.crt + tls.key (the forge CA)
+  ports: [443]
+session:
+  enabled: true
+stats:
+  address: ":9093"
+pipeline:
+  outbound:
+    plugins:
+      - name: inference-parser                   # decode LLM traffic for abctl
+      - name: mcp-parser                          # decode MCP tool calls
+      - name: placeholder-resolve                 # swap openshell:resolve:env:<KEY> -> real token
+        config:
+          source: secret_dir                      # resolve from mounted files (vs source: gateway)
+          secret_dir: /etc/authbridge-cred
+  inbound:
+    plugins:
+      - name: a2a-parser
