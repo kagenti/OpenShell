@@ -88,11 +88,12 @@ internal proxy to the AuthBridge sidecar.
   **[Kagenti Sandbox Guide](https://github.com/kagenti/kagenti/blob/main/docs/sandbox-guide.md)**
   (Kind cluster, shared infra, a tenant gateway, the CLI configured and logged in).
   This guide assumes you can already create a normal sandbox in `team1`.
-- **Check out the feature branches this integration depends on (both unmerged):** this
-  OpenShell repo on **`feat/authbridge-egress`** (`NetworkMode::External`), and a
-  kagenti-extensions checkout on **`feat/placeholder-resolve-plugin`** (the plugin). See
-  *Where the images come from* below; `01-build-images.sh` fails fast if either checkout
-  is missing its feature.
+- **This OpenShell repo on the `feat/authbridge-egress` branch** (`NetworkMode::External`) —
+  you're already on it if you're reading this, and the supervisor is built from it. The
+  kagenti-extensions **`placeholder-resolve`** plugin is **cloned automatically** by
+  `01-build-images.sh` (from `huang195/kagenti-extensions @ feat/placeholder-resolve-plugin`
+  by default; override with `EXT_REPO`/`EXT_REF`, or set `EXT_DIR` to a local checkout). See
+  *Where the images come from* below; the script fails fast if the resolved source lacks the plugin.
 - `kubectl`, `jq`, `openssl`, and `podman` (or Docker) on your machine.
 - An LLM endpoint that accepts `Authorization: Bearer <token>` (e.g. a LiteLLM
   proxy) and the corresponding token.
@@ -102,9 +103,9 @@ endpoint exported once:
 
 ```bash
 cd examples/authbridge-egress
-export EXT_DIR=~/src/kagenti-extensions      # kagenti-extensions @ feat/placeholder-resolve-plugin
 export KAGENTI_DIR=~/src/kagenti             # kagenti repo (lets Step 1 redeploy the gateway)
 export LLM_URL=https://your-litellm.example.com
+# kagenti-extensions is cloned for you; set EXT_DIR=~/src/kagenti-extensions to reuse a local checkout
 ```
 
 The tenant namespace is `team1` and the kind cluster is `kagenti`. Override with the
@@ -122,15 +123,17 @@ merged to mainline**, so the images are built from local checkouts of those bran
 | authbridge-proxy (built here) | kagenti-extensions `feat/placeholder-resolve-plugin` (`ca8cbd8`) | `placeholder-resolve` + `inference-parser` (Anthropic) + the SSE-relay fix + the session API — all stacked on this branch |
 | gateway (prebuilt, pulled) | image tag `mvp-v2-7784be8` (commit `7784be8`, the base of `feat/authbridge-egress`) | the `inference-scoped-provider-lookup` fix — **not** in the chart default `v0.0.56-rc.3` |
 
-Until these branches are merged (or tagged), reproducing the demo means checking them
-out at (or after) the commits above and pinning the gateway tag as shown in Step 1.
+Until these branches are merged (or tagged), the supervisor is built from this OpenShell
+checkout and the plugin is cloned from `EXT_REPO`/`EXT_REF` (Step 1), with the gateway tag
+pinned as shown.
 
 ## Step 1: Build and load the images
 
 [`01-build-images.sh`](https://github.com/kagenti/OpenShell/tree/feat/authbridge-egress/examples/authbridge-egress)
-compiles the External-capable supervisor binary in a `rust:1.95` builder container,
-wraps it in a `scratch` image, builds the AuthBridge proxy image, loads both into kind,
-and — when `KAGENTI_DIR` is set — redeploys the `team1` gateway for you:
+clones the kagenti-extensions `placeholder-resolve` plugin (unless `EXT_DIR` points at a
+local checkout), compiles the External-capable supervisor binary in a `rust:1.95` builder
+container, wraps it in a `scratch` image, builds the AuthBridge proxy image, loads both into
+kind, and — when `KAGENTI_DIR` is set — redeploys the `team1` gateway for you:
 
 ```bash
 ./01-build-images.sh        # uses $EXT_DIR; with $KAGENTI_DIR set, also redeploys the gateway

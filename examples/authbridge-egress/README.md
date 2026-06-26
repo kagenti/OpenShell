@@ -30,12 +30,14 @@ Full walkthrough and concepts: **[docs/sandboxes/authbridge-egress.mdx](../../do
 
 1. A working OpenShell install with a `team1` tenant gateway, per the
    [Kagenti Sandbox Guide](https://github.com/kagenti/kagenti/blob/main/docs/sandbox-guide.md).
-2. **Check out the unmerged feature branches this integration depends on:**
-   - this repo (OpenShell) on **`feat/authbridge-egress`** (adds `NetworkMode::External`);
-   - a [kagenti-extensions](https://github.com/kagenti/kagenti-extensions) checkout on
-     **`feat/placeholder-resolve-plugin`** (the `placeholder-resolve` plugin).
+2. **This OpenShell repo on the `feat/authbridge-egress` branch** (adds
+   `NetworkMode::External`) — you're already on it if you're reading this, and the
+   supervisor image is built from it.
 
-   `01-build-images.sh` fails fast if a checkout is missing its feature.
+   The kagenti-extensions **`placeholder-resolve`** plugin is **cloned automatically** by
+   `01-build-images.sh` (from `huang195/kagenti-extensions @ feat/placeholder-resolve-plugin`
+   by default — override with `EXT_REPO`/`EXT_REF`, or set `EXT_DIR` to a local checkout).
+   The script fails fast if the resolved source is missing the plugin.
 3. `kubectl`, `jq`, `openssl`, and `podman` (or Docker).
 
 ## Quick start
@@ -43,10 +45,10 @@ Full walkthrough and concepts: **[docs/sandboxes/authbridge-egress.mdx](../../do
 ```bash
 cd examples/authbridge-egress
 
-# Set these once: your checkouts + your upstream LLM endpoint.
-export EXT_DIR=~/src/kagenti-extensions        # kagenti-extensions @ feat/placeholder-resolve-plugin
+# Set these once: your kagenti checkout + your upstream LLM endpoint.
 export KAGENTI_DIR=~/src/kagenti               # kagenti repo (lets step 1 redeploy the gateway)
 export LLM_URL=https://your-litellm.example.com
+# kagenti-extensions is cloned for you; set EXT_DIR=~/src/kagenti-extensions to reuse a local checkout
 
 # 1. Build + load both images AND redeploy the team1 gateway (gateway tag auto-pinned),
 #    then log back in (the gateway restart expires your CLI token).
@@ -76,7 +78,9 @@ SANDBOX=<sandbox-name>
 
 | Var | Default | Used by |
 |-----|---------|---------|
-| `EXT_DIR` | _(required)_ | 01 |
+| `EXT_DIR` | _(optional — local kagenti-extensions checkout; else auto-cloned)_ | 01 |
+| `EXT_REPO` | `https://github.com/huang195/kagenti-extensions` | 01 |
+| `EXT_REF` | `feat/placeholder-resolve-plugin` | 01 |
 | `KAGENTI_DIR` | _(optional — if set, 01 auto-redeploys the gateway)_ | 01 |
 | `NS` | `team1` | 01, 02, 03, 04 |
 | `CLUSTER` | `kagenti` | 01 |

@@ -6,8 +6,13 @@
 # load both into the kind cluster, and (optionally) point the tenant gateway at
 # them with the gateway tag correctly pinned.
 #
-# Env knobs (all optional except EXT_DIR):
-#   EXT_DIR           kagenti-extensions checkout (feat/placeholder-resolve-plugin)   [required]
+# Env knobs (all optional):
+#   EXT_DIR           Local kagenti-extensions checkout (feat/placeholder-resolve-plugin).
+#                     Used as-is if set; if unset, the script clones EXT_REPO @ EXT_REF.
+#   EXT_REPO          Repo to clone the plugin from when EXT_DIR is unset
+#                     (default: https://github.com/huang195/kagenti-extensions; switch to
+#                      https://github.com/kagenti/kagenti-extensions once PR #626 merges).
+#   EXT_REF           Branch/ref to clone (default: feat/placeholder-resolve-plugin; 'main' post-merge).
 #   KAGENTI_DIR       kagenti repo checkout. If set, this script also runs
 #                     deploy-tenant.sh to redeploy the gateway with the new
 #                     supervisor image and the pinned gateway tag. If unset, it
@@ -24,7 +29,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OPENSHELL_DIR="${OPENSHELL_DIR:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
-EXT_DIR="${EXT_DIR:?set EXT_DIR to your kagenti-extensions checkout (feat/placeholder-resolve-plugin)}"
+EXT_DIR="${EXT_DIR:-}"
+EXT_REPO="${EXT_REPO:-https://github.com/huang195/kagenti-extensions}"
+EXT_REF="${EXT_REF:-feat/placeholder-resolve-plugin}"
 ARCH="${ARCH:-arm64}"
 CLUSTER="${CLUSTER:-kagenti}"
 NS="${NS:-team1}"
@@ -38,6 +45,21 @@ case "$ARCH" in
   *) echo "unsupported ARCH '$ARCH' (use arm64 or amd64)" >&2; exit 1 ;;
 esac
 
+mkdir -p "$OUT"
+
+# Resolve the kagenti-extensions source for the AuthBridge image: use EXT_DIR if
+# given, otherwise clone EXT_REPO @ EXT_REF (the plugin is on an unmerged branch).
+if [ -z "$EXT_DIR" ]; then
+  EXT_DIR="$OUT/kagenti-extensions"
+  if [ -d "$EXT_DIR/.git" ]; then
+    echo "==> Updating $EXT_DIR ($EXT_REF from $EXT_REPO)..."
+    git -C "$EXT_DIR" fetch --depth 1 "$EXT_REPO" "$EXT_REF" && git -C "$EXT_DIR" checkout -f FETCH_HEAD
+  else
+    echo "==> Cloning $EXT_REPO ($EXT_REF) -> $EXT_DIR..."
+    git clone --depth 1 --branch "$EXT_REF" "$EXT_REPO" "$EXT_DIR"
+  fi
+fi
+
 # The supporting commits are NOT merged to mainline — fail fast if the checkouts
 # don't actually contain them, rather than silently building feature-less images.
 if ! grep -rqs "OPENSHELL_EXTERNAL_PROXY" "$OPENSHELL_DIR/crates/openshell-sandbox/src/"; then
@@ -47,11 +69,9 @@ if ! grep -rqs "OPENSHELL_EXTERNAL_PROXY" "$OPENSHELL_DIR/crates/openshell-sandb
 fi
 if [ ! -d "$EXT_DIR/authbridge/authlib/plugins/placeholderresolve" ]; then
   echo "ERROR: $EXT_DIR has no placeholder-resolve plugin." >&2
-  echo "       Check out the kagenti-extensions 'feat/placeholder-resolve-plugin' branch, or set EXT_DIR." >&2
+  echo "       Check EXT_REPO/EXT_REF, or point EXT_DIR at a checkout that has it." >&2
   exit 1
 fi
-
-mkdir -p "$OUT"
 
 echo "==> [1/4] Compiling the supervisor binary ($RUST_TARGET) in a builder container..."
 podman run --rm \
