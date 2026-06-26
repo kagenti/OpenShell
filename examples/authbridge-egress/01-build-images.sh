@@ -114,7 +114,7 @@ if [ -f "$KAGENTI_DIR/scripts/openshell/deploy-tenant.sh" ]; then
     --set supervisorImage.repository="${SUPERVISOR_IMAGE%:*}" \
     --set supervisorImage.tag="${SUPERVISOR_IMAGE##*:}" \
     --set images.gateway.tag="$GATEWAY_TAG" \
-    --set sandboxImagePullPolicy=Never
+    --set sandboxImagePullPolicy=IfNotPresent
   echo "==> Done. The gateway restart expired your CLI token — run:  openshell gateway login"
 else
   cat <<EOF
@@ -126,7 +126,7 @@ else
         --set supervisorImage.repository=${SUPERVISOR_IMAGE%:*} \\
         --set supervisorImage.tag=${SUPERVISOR_IMAGE##*:} \\
         --set images.gateway.tag=$GATEWAY_TAG \\
-        --set sandboxImagePullPolicy=Never
+        --set sandboxImagePullPolicy=IfNotPresent
     Then re-run 'openshell gateway login' (the gateway restart expires your token).
 EOF
 fi
