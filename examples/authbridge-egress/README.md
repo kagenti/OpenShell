@@ -60,7 +60,8 @@ beside this OpenShell checkout), and `NS`/`CLUSTER`/`ARCH`. See the table below.
 ```bash
 SANDBOX=authbridge-egress    # the sandbox this run creates (rename if you like)
 
-# Build + load both images, redeploy the team1 gateway, then re-login (the restart expires your token).
+# Build + load both images, redeploy the team1 gateway, then re-authenticate
+# (the restart expires your CLI token; if `gateway login` errors, see the note below).
 ./01-build-images.sh
 openshell gateway login
 
@@ -80,6 +81,15 @@ openshell sandbox create --name "$SANDBOX" --provider claude -- sleep infinity
 
 > If the kagenti repo isn't beside this checkout, set `KAGENTI_DIR`; if it can't be found,
 > `01-build-images.sh` prints the gateway `deploy-tenant.sh` command to run yourself.
+
+**If `openshell gateway login` fails** with *"does not use edge authentication"*, your CLI predates
+OIDC `gateway login`. Re-register instead — this re-runs the OIDC login your CLI *does* support (run it
+interactively so the browser opens, and finish within ~120s):
+
+```bash
+openshell gateway remove openshell-team1
+scripts/openshell/configure-cli.sh team1     # from your kagenti checkout
+```
 
 ## Common env knobs
 
