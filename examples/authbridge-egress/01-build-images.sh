@@ -3,13 +3,20 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Build the External-capable supervisor image and the AuthBridge proxy image,
-# then load both into the kind cluster.
+# load both into the kind cluster, and (optionally) point the tenant gateway at
+# them with the gateway tag correctly pinned.
 #
 # Env knobs (all optional except EXT_DIR):
 #   EXT_DIR           kagenti-extensions checkout (feat/placeholder-resolve-plugin)   [required]
+#   KAGENTI_DIR       kagenti repo checkout. If set, this script also runs
+#                     deploy-tenant.sh to redeploy the gateway with the new
+#                     supervisor image and the pinned gateway tag. If unset, it
+#                     prints the deploy command for you to run.
 #   OPENSHELL_DIR     OpenShell checkout (default: repo root, derived from this script)
+#   NS                tenant namespace for the gateway redeploy                        (default: team1)
 #   ARCH              target arch: arm64 | amd64                                       (default: arm64)
 #   CLUSTER           kind cluster name                                                (default: kagenti)
+#   GATEWAY_TAG       gateway image tag (must match this branch's base)   (default: mvp-v2-7784be8)
 #   SUPERVISOR_IMAGE  supervisor image tag    (default: localhost/openshell/supervisor:dev)
 #   AUTHBRIDGE_IMAGE  authbridge image tag    (default: localhost/authbridge-proxy:dev)
 #   OUT               build output dir (must be shared with the podman VM)            (default: $HOME/openshell-out)
@@ -20,6 +27,7 @@ OPENSHELL_DIR="${OPENSHELL_DIR:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 EXT_DIR="${EXT_DIR:?set EXT_DIR to your kagenti-extensions checkout (feat/placeholder-resolve-plugin)}"
 ARCH="${ARCH:-arm64}"
 CLUSTER="${CLUSTER:-kagenti}"
+NS="${NS:-team1}"
 SUPERVISOR_IMAGE="${SUPERVISOR_IMAGE:-localhost/openshell/supervisor:dev}"
 AUTHBRIDGE_IMAGE="${AUTHBRIDGE_IMAGE:-localhost/authbridge-proxy:dev}"
 OUT="${OUT:-$HOME/openshell-out}"
@@ -75,20 +83,28 @@ for img in "$SUPERVISOR_IMAGE" "$AUTHBRIDGE_IMAGE"; do
   KIND_EXPERIMENTAL_PROVIDER=podman kind load image-archive "$tar" --name "$CLUSTER"
 done
 
-cat <<EOF
+echo
+echo "==> Images loaded into kind '$CLUSTER':  supervisor=$SUPERVISOR_IMAGE  authbridge=$AUTHBRIDGE_IMAGE"
 
-==> Done. Both images are loaded into kind cluster '$CLUSTER':
-      supervisor: $SUPERVISOR_IMAGE
-      authbridge: $AUTHBRIDGE_IMAGE
-
-    Next, point the tenant gateway at the supervisor image (Kagenti repo script).
-    NOTE: also pin the gateway tag — feat/authbridge-egress is based on commit 7784be8,
-    whose gateway image is '$GATEWAY_TAG'; the chart default (v0.0.56-rc.3) lacks the
-    inference-scoped-provider-lookup fix and breaks 'openshell inference/provider'.
-      scripts/openshell/deploy-tenant.sh team1 \\
+if [ -n "${KAGENTI_DIR:-}" ]; then
+  echo "==> Redeploying the '$NS' gateway (supervisor=$SUPERVISOR_IMAGE, gateway pinned to $GATEWAY_TAG)..."
+  "$KAGENTI_DIR/scripts/openshell/deploy-tenant.sh" "$NS" \
+    --set supervisorImage.repository="${SUPERVISOR_IMAGE%:*}" \
+    --set supervisorImage.tag="${SUPERVISOR_IMAGE##*:}" \
+    --set images.gateway.tag="$GATEWAY_TAG" \
+    --set sandboxImagePullPolicy=Never
+  echo "==> Done. The gateway restart expired your CLI token — run:  openshell gateway login"
+else
+  cat <<EOF
+==> Next, point the '$NS' gateway at these images. Set KAGENTI_DIR=<your kagenti repo>
+    and re-run this script to do it automatically, or run it yourself. The gateway tag
+    MUST be pinned to '$GATEWAY_TAG' — the chart default (v0.0.56-rc.3) predates the
+    inference-scoped-provider-lookup fix and breaks 'openshell inference/provider':
+      \$KAGENTI_DIR/scripts/openshell/deploy-tenant.sh $NS \\
         --set supervisorImage.repository=${SUPERVISOR_IMAGE%:*} \\
         --set supervisorImage.tag=${SUPERVISOR_IMAGE##*:} \\
         --set images.gateway.tag=$GATEWAY_TAG \\
         --set sandboxImagePullPolicy=Never
-    (the gateway restart expires your CLI token — re-run 'openshell gateway login').
+    Then re-run 'openshell gateway login' (the gateway restart expires your token).
 EOF
+fi

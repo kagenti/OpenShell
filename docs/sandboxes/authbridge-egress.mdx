@@ -88,15 +88,23 @@ internal proxy to the AuthBridge sidecar.
   **[Kagenti Sandbox Guide](https://github.com/kagenti/kagenti/blob/main/docs/sandbox-guide.md)**
   (Kind cluster, shared infra, a tenant gateway, the CLI configured and logged in).
   This guide assumes you can already create a normal sandbox in `team1`.
+- **Check out the feature branches this integration depends on (both unmerged):** this
+  OpenShell repo on **`feat/authbridge-egress`** (`NetworkMode::External`), and a
+  kagenti-extensions checkout on **`feat/placeholder-resolve-plugin`** (the plugin). See
+  *Where the images come from* below; `01-build-images.sh` fails fast if either checkout
+  is missing its feature.
 - `kubectl`, `jq`, `openssl`, and `podman` (or Docker) on your machine.
-- The fork branches listed in the status note above.
 - An LLM endpoint that accepts `Authorization: Bearer <token>` (e.g. a LiteLLM
   proxy) and the corresponding token.
 
-All commands below are run from the example directory:
+All commands below are run from the example directory, with your checkouts and LLM
+endpoint exported once:
 
 ```bash
 cd examples/authbridge-egress
+export EXT_DIR=~/src/kagenti-extensions      # kagenti-extensions @ feat/placeholder-resolve-plugin
+export KAGENTI_DIR=~/src/kagenti             # kagenti repo (lets Step 1 redeploy the gateway)
+export LLM_URL=https://your-litellm.example.com
 ```
 
 The tenant namespace is `team1` and the kind cluster is `kagenti`. Override with the
@@ -121,27 +129,20 @@ out at (or after) the commits above and pinning the gateway tag as shown in Step
 
 [`01-build-images.sh`](https://github.com/kagenti/OpenShell/tree/feat/authbridge-egress/examples/authbridge-egress)
 compiles the External-capable supervisor binary in a `rust:1.95` builder container,
-wraps it in a `scratch` image, builds the AuthBridge proxy image, and loads both into
-kind. Point `EXT_DIR` at your kagenti-extensions checkout:
+wraps it in a `scratch` image, builds the AuthBridge proxy image, loads both into kind,
+and — when `KAGENTI_DIR` is set — redeploys the `team1` gateway for you:
 
 ```bash
-EXT_DIR=~/src/kagenti-extensions ./01-build-images.sh
+./01-build-images.sh        # uses $EXT_DIR; with $KAGENTI_DIR set, also redeploys the gateway
+openshell gateway login     # the gateway restart expires your CLI token
 ```
 
-Then point the tenant gateway at the new supervisor image (this is a Kagenti-repo
-script; the gateway restart expires your CLI token, so re-login afterward). Also pin
-the **gateway** tag: `feat/authbridge-egress` is based on commit `7784be8`, whose
-gateway image is `mvp-v2-7784be8`; the chart default (`v0.0.56-rc.3`) predates the
-`inference-scoped-provider-lookup` fix and breaks `openshell inference`/`provider`.
-
-```bash
-scripts/openshell/deploy-tenant.sh team1 \
-  --set supervisorImage.repository=localhost/openshell/supervisor \
-  --set supervisorImage.tag=dev \
-  --set images.gateway.tag=mvp-v2-7784be8 \
-  --set sandboxImagePullPolicy=Never
-openshell gateway login
-```
+The redeploy points the gateway at the new supervisor image **and pins the gateway tag
+to `mvp-v2-7784be8`** — required because the chart default (`v0.0.56-rc.3`) predates the
+`inference-scoped-provider-lookup` fix and breaks `openshell inference`/`provider`
+(`feat/authbridge-egress` is based on commit `7784be8`, whose gateway image is that tag).
+If you don't set `KAGENTI_DIR`, the script instead prints the `deploy-tenant.sh` command
+to run yourself.
 
 ## Step 2: Create the CA and AuthBridge objects
 
@@ -169,7 +170,7 @@ Use a long-lived entrypoint so you can drive it interactively:
 # credential key MUST be ANTHROPIC_AUTH_TOKEN -> the agent sends Bearer auth
 openshell provider create --name claude --type anthropic \
   --credential ANTHROPIC_AUTH_TOKEN \
-  --config ANTHROPIC_BASE_URL=https://<your-llm-url>
+  --config ANTHROPIC_BASE_URL="$LLM_URL"
 openshell inference set --provider claude --model claude-sonnet-4-6 --no-verify
 
 openshell sandbox create --provider claude -- sleep infinity
@@ -186,7 +187,7 @@ fiddly bits — the non-deterministic env index and the provider's **revision-ke
 credential placeholder (it projects the Secret under that exact filename):
 
 ```bash
-./03-inject-authbridge.sh <sandbox-name> https://<your-llm-url>
+./03-inject-authbridge.sh <sandbox-name> "$LLM_URL"
 ```
 
 <details>

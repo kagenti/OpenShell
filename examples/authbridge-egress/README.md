@@ -26,48 +26,62 @@ Full walkthrough and concepts: **[docs/sandboxes/authbridge-egress.mdx](../../do
 | `04-verify.sh` | End-to-end checks: External mode, AuthBridge up, `claude` → LLM, placeholder-only env, egress containment, session API |
 | `config.yaml` | The AuthBridge sidecar config (forward proxy + tls_bridge + parsers + placeholder-resolve) |
 
-## Quick start
+## Prerequisites
 
-Prerequisite: a working OpenShell install with a `team1` tenant gateway, per the
-[Kagenti Sandbox Guide](https://github.com/kagenti/kagenti/blob/main/docs/sandbox-guide.md).
+1. A working OpenShell install with a `team1` tenant gateway, per the
+   [Kagenti Sandbox Guide](https://github.com/kagenti/kagenti/blob/main/docs/sandbox-guide.md).
+2. **Check out the unmerged feature branches this integration depends on:**
+   - this repo (OpenShell) on **`feat/authbridge-egress`** (adds `NetworkMode::External`);
+   - a [kagenti-extensions](https://github.com/kagenti/kagenti-extensions) checkout on
+     **`feat/placeholder-resolve-plugin`** (the `placeholder-resolve` plugin).
+
+   `01-build-images.sh` fails fast if a checkout is missing its feature.
+3. `kubectl`, `jq`, `openssl`, and `podman` (or Docker).
+
+## Quick start
 
 ```bash
 cd examples/authbridge-egress
 
-# 1. Build + load both images (point EXT_DIR at your kagenti-extensions checkout)
-EXT_DIR=~/src/kagenti-extensions ./01-build-images.sh
-# then point the gateway at the supervisor image (Kagenti repo); pin the gateway tag
-# too — the chart default v0.0.56-rc.3 predates the inference-scoped-provider-lookup fix:
-#   scripts/openshell/deploy-tenant.sh team1 \
-#     --set supervisorImage.repository=localhost/openshell/supervisor \
-#     --set supervisorImage.tag=dev \
-#     --set images.gateway.tag=mvp-v2-7784be8 \
-#     --set sandboxImagePullPolicy=Never
-# (re-run 'openshell gateway login' after the gateway restart)
+# Set these once: your checkouts + your upstream LLM endpoint.
+export EXT_DIR=~/src/kagenti-extensions        # kagenti-extensions @ feat/placeholder-resolve-plugin
+export KAGENTI_DIR=~/src/kagenti               # kagenti repo (lets step 1 redeploy the gateway)
+export LLM_URL=https://your-litellm.example.com
 
-# 2. CA + k8s objects (LLM_TOKEN keeps the real token off the command line)
+# 1. Build + load both images AND redeploy the team1 gateway (gateway tag auto-pinned),
+#    then log back in (the gateway restart expires your CLI token).
+./01-build-images.sh
+openshell gateway login
+
+# 2. CA + k8s objects (LLM_TOKEN keeps the real token off the command line).
 LLM_TOKEN='<your real LLM token>' ./02-setup-authbridge.sh
 
-# 3. Create a provider-bound sandbox, then inject AuthBridge
+# 3. Create a provider-bound sandbox, then inject AuthBridge.
 openshell provider create --name claude --type anthropic \
-  --credential ANTHROPIC_AUTH_TOKEN --config ANTHROPIC_BASE_URL=https://<your-llm-url>
+  --credential ANTHROPIC_AUTH_TOKEN --config ANTHROPIC_BASE_URL="$LLM_URL"
 openshell inference set --provider claude --model claude-sonnet-4-6 --no-verify
 openshell sandbox create --provider claude -- sleep infinity
-openshell sandbox list   # note the generated name
-./03-inject-authbridge.sh <sandbox-name> https://<your-llm-url>
+openshell sandbox list                         # note the generated name, then:
+SANDBOX=<sandbox-name>
+./03-inject-authbridge.sh "$SANDBOX" "$LLM_URL"
 
-# 4. Verify
-./04-verify.sh <sandbox-name>
+# 4. Verify.
+./04-verify.sh "$SANDBOX"
 ```
+
+> If you don't set `KAGENTI_DIR`, step 1 instead prints the `deploy-tenant.sh` command
+> to run yourself (the gateway tag must be pinned).
 
 ## Common env knobs
 
 | Var | Default | Used by |
 |-----|---------|---------|
-| `NS` | `team1` | 02, 03, 04 |
+| `EXT_DIR` | _(required)_ | 01 |
+| `KAGENTI_DIR` | _(optional — if set, 01 auto-redeploys the gateway)_ | 01 |
+| `NS` | `team1` | 01, 02, 03, 04 |
 | `CLUSTER` | `kagenti` | 01 |
 | `ARCH` | `arm64` | 01 |
-| `EXT_DIR` | _(required)_ | 01 |
+| `GATEWAY_TAG` | `mvp-v2-7784be8` | 01 |
 | `SUPERVISOR_IMAGE` | `localhost/openshell/supervisor:dev` | 01 |
 | `AUTHBRIDGE_IMAGE` | `localhost/authbridge-proxy:dev` | 01, 03 |
 | `LLM_TOKEN` | _(optional)_ | 02 |
