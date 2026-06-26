@@ -112,6 +112,7 @@ kubectl patch sandbox "$SB" -n "$NS" --type=json -p "$(cat <<JSON
     "name":"authbridge-proxy",
     "image":"${AUTHBRIDGE_IMAGE}",
     "imagePullPolicy":"Never",
+    "securityContext":{"runAsUser":0},
     "args":["--config","/etc/authbridge/config.yaml"],
     "volumeMounts":[
       {"name":"authbridge-sidecar-config","mountPath":"/etc/authbridge","readOnly":true},
