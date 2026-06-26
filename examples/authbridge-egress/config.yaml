@@ -26,12 +26,13 @@ pipeline:
         config:
           source: gateway                          # fetch the real credential from the OpenShell gateway
           gateway:
-            # Rendered per-sandbox by 03-inject-authbridge.sh:
-            endpoint: __GATEWAY_ENDPOINT__         #   from the pod's OPENSHELL_ENDPOINT (scheme picks mTLS vs plaintext)
-            sandbox_id: __SANDBOX_ID__             #   from the pod's OPENSHELL_SANDBOX_ID (the sandbox UUID)
+            # Rendered per-sandbox by 03-inject-authbridge.sh from the pod's OPENSHELL_* env:
+            endpoint: "__GATEWAY_ENDPOINT__"       #   OPENSHELL_ENDPOINT (scheme picks mTLS vs plaintext)
+            sandbox_id: "__SANDBOX_ID__"           #   OPENSHELL_SANDBOX_ID (the sandbox UUID)
             insecure: __INSECURE__                 #   true only when the endpoint is plaintext http://
-            # Static — the sandbox's own gateway identity:
-            mtls_cert_dir: /etc/authbridge-gw-tls             # combined tls.crt/tls.key + ca.crt (03 builds this; https only)
+            mtls_cert: "__MTLS_CERT__"             #   OPENSHELL_TLS_CERT (client cert; empty for plaintext)
+            mtls_key: "__MTLS_KEY__"               #   OPENSHELL_TLS_KEY  (client key)
+            mtls_ca: "__MTLS_CA__"                 #   OPENSHELL_TLS_CA   (gateway CA)
             sa_token_path: /var/run/secrets/openshell/token   # projected SA token (audience openshell-gateway)
   inbound:
     plugins:

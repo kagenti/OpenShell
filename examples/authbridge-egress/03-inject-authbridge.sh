@@ -8,7 +8,7 @@
 #
 # The sidecar uses the placeholder-resolve plugin's `gateway` source: it authenticates
 # to the OpenShell gateway AS the sandbox (mounting the pod's projected SA token, and —
-# for an https:// gateway — the same client mTLS cert + CA the supervisor uses) and
+# for an https:// gateway — the same client cert/key + CA the supervisor uses) and
 # fetches the real credential, then substitutes it for the openshell:resolve:env:<KEY>
 # placeholder. No mounted credential Secret — the real token lives only in the gateway.
 #
@@ -30,7 +30,8 @@ if [ -z "$POD_JSON" ]; then
   echo "ERROR: pod '$SB' not found in namespace '$NS'. Create the sandbox first." >&2
   exit 1
 fi
-penv() { echo "$POD_JSON" | jq -r --arg n "$1" '.spec.containers[0].env[]|select(.name==$n)|.value // empty'; }
+penv()   { echo "$POD_JSON" | jq -r --arg n "$1" '.spec.containers[0].env[]|select(.name==$n)|.value // empty'; }
+vol_at() { echo "$POD_JSON" | jq -r --arg d "$1" '.spec.containers[0].volumeMounts[]|select(.mountPath==$d)|.name' | head -1; }
 
 # --- The sandbox's gateway identity, read from the running supervisor (driver-injected) ---
 ENDPOINT=$(penv OPENSHELL_ENDPOINT)
@@ -52,36 +53,29 @@ case " $(echo "$POD_JSON" | jq -r '.spec.volumes[].name' | tr '\n' ' ') " in
   *) echo "ERROR: pod '$SB' has no 'openshell-sa-token' volume; the sidecar cannot authenticate to the gateway." >&2; exit 1 ;;
 esac
 
-# --- For an https:// gateway, combine the supervisor's client cert/key + CA into one dir ---
-# The plugin's gateway client loads tls.crt/tls.key/ca.crt from a single mtls_cert_dir, but
-# the driver splits them (OPENSHELL_TLS_CERT/KEY vs OPENSHELL_TLS_CA). Build a projected volume
-# from the same Secrets the supervisor mounts, remapped into /etc/authbridge-gw-tls.
-TLS_MOUNT=""        # extra sidecar volumeMount (leading comma) on the mTLS path
-TLS_VOLUME_OP=""    # extra podTemplate volume patch op (leading comma) on the mTLS path
+# --- For an https:// gateway, give the sidecar the supervisor's client cert/key + CA ---
+# OpenShell exposes them as three independent paths (OPENSHELL_TLS_CERT/KEY/CA — the CA is
+# split into a separate secret/dir). The plugin takes the three paths directly, so the sidecar
+# just mounts the SAME driver-injected volumes at the SAME paths the supervisor uses.
+TLS_MOUNTS=""                       # extra sidecar volumeMounts (each leading-comma)
+MTLS_CERT=""; MTLS_KEY=""; MTLS_CA=""
 if [ "$MTLS" = 1 ]; then
-  TLS_CERT=$(penv OPENSHELL_TLS_CERT); TLS_KEY=$(penv OPENSHELL_TLS_KEY); TLS_CA=$(penv OPENSHELL_TLS_CA)
-  if [ -z "$TLS_CERT" ] || [ -z "$TLS_KEY" ] || [ -z "$TLS_CA" ]; then
+  MTLS_CERT=$(penv OPENSHELL_TLS_CERT); MTLS_KEY=$(penv OPENSHELL_TLS_KEY); MTLS_CA=$(penv OPENSHELL_TLS_CA)
+  if [ -z "$MTLS_CERT" ] || [ -z "$MTLS_KEY" ] || [ -z "$MTLS_CA" ]; then
     echo "ERROR: https:// gateway but OPENSHELL_TLS_CERT/KEY/CA are not all set on the supervisor." >&2
     exit 1
   fi
-  CERT_DIR=$(dirname "$TLS_CERT"); CA_DIR=$(dirname "$TLS_CA")
-  CERT_KEY=$(basename "$TLS_CERT"); KEY_KEY=$(basename "$TLS_KEY"); CA_KEY=$(basename "$TLS_CA")
-  vol_at() { echo "$POD_JSON" | jq -r --arg d "$1" '.spec.containers[0].volumeMounts[]|select(.mountPath==$d)|.name' | head -1; }
-  secret_of() { echo "$POD_JSON" | jq -r --arg v "$1" '.spec.volumes[]|select(.name==$v)|.secret.secretName // empty'; }
-  CERT_SECRET=$(secret_of "$(vol_at "$CERT_DIR")"); CA_SECRET=$(secret_of "$(vol_at "$CA_DIR")")
-  if [ -z "$CERT_SECRET" ] || [ -z "$CA_SECRET" ]; then
-    echo "ERROR: could not resolve the gateway client-cert / CA Secrets backing $CERT_DIR and $CA_DIR." >&2
-    exit 1
-  fi
-  echo "    mTLS: client cert from Secret '$CERT_SECRET', CA from Secret '$CA_SECRET' -> /etc/authbridge-gw-tls"
-  TLS_MOUNT=',{"name":"authbridge-gw-tls","mountPath":"/etc/authbridge-gw-tls","readOnly":true}'
-  TLS_VOLUME_OP=$(cat <<JSON
-,{"op":"add","path":"/spec/podTemplate/spec/volumes/-","value":{"name":"authbridge-gw-tls","projected":{"sources":[
-  {"secret":{"name":"${CERT_SECRET}","items":[{"key":"${CERT_KEY}","path":"tls.crt"},{"key":"${KEY_KEY}","path":"tls.key"}]}},
-  {"secret":{"name":"${CA_SECRET}","items":[{"key":"${CA_KEY}","path":"ca.crt"}]}}
-]}}}
-JSON
-)
+  # Mount each unique dir that holds the TLS material, reusing the agent's volume for that dir.
+  while IFS= read -r d; do
+    [ -z "$d" ] && continue
+    v=$(vol_at "$d")
+    if [ -z "$v" ]; then
+      echo "ERROR: no volume is mounted at '$d' on the agent — cannot give the sidecar the gateway TLS material." >&2
+      exit 1
+    fi
+    TLS_MOUNTS="$TLS_MOUNTS,{\"name\":\"$v\",\"mountPath\":\"$d\",\"readOnly\":true}"
+  done < <(printf '%s\n%s\n%s\n' "$(dirname "$MTLS_CERT")" "$(dirname "$MTLS_KEY")" "$(dirname "$MTLS_CA")" | sort -u)
+  echo "    mTLS: mounting the gateway client cert/key + CA (cert=$MTLS_CERT  ca=$MTLS_CA)"
 fi
 
 # --- Render the sidecar config from the template and (re)create the ConfigMap ---
@@ -90,6 +84,9 @@ RENDERED=$(mktemp); trap 'rm -f "$RENDERED"' EXIT
 sed -e "s|__GATEWAY_ENDPOINT__|${ENDPOINT}|" \
     -e "s|__SANDBOX_ID__|${SBID}|" \
     -e "s|__INSECURE__|${INSECURE}|" \
+    -e "s|__MTLS_CERT__|${MTLS_CERT}|" \
+    -e "s|__MTLS_KEY__|${MTLS_KEY}|" \
+    -e "s|__MTLS_CA__|${MTLS_CA}|" \
     "$SCRIPT_DIR/config.yaml" > "$RENDERED"
 kubectl create configmap authbridge-sidecar-config -n "$NS" \
   --from-file=config.yaml="$RENDERED" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
@@ -117,17 +114,17 @@ kubectl patch sandbox "$SB" -n "$NS" --type=json -p "$(cat <<JSON
     "volumeMounts":[
       {"name":"authbridge-sidecar-config","mountPath":"/etc/authbridge","readOnly":true},
       {"name":"authbridge-ca","mountPath":"/etc/authbridge-ca","readOnly":true},
-      {"name":"openshell-sa-token","mountPath":"/var/run/secrets/openshell","readOnly":true}${TLS_MOUNT}
+      {"name":"openshell-sa-token","mountPath":"/var/run/secrets/openshell","readOnly":true}${TLS_MOUNTS}
     ]
   }},
   {"op":"add","path":"/spec/podTemplate/spec/volumes/-","value":{"name":"authbridge-sidecar-config","configMap":{"name":"authbridge-sidecar-config"}}},
-  {"op":"add","path":"/spec/podTemplate/spec/volumes/-","value":{"name":"authbridge-ca","secret":{"secretName":"authbridge-ca"}}}${TLS_VOLUME_OP}
+  {"op":"add","path":"/spec/podTemplate/spec/volumes/-","value":{"name":"authbridge-ca","secret":{"secretName":"authbridge-ca"}}}
 ]
 JSON
 )"
-# The openshell-sa-token volume is injected by the OpenShell k8s driver at pod build, so the
-# sidecar mounts it without re-declaring it. authbridge-gw-tls (mTLS only) is a new projected
-# volume this script adds, combining the supervisor's client cert/key + CA into one dir.
+# The openshell-sa-token volume and the gateway TLS volumes (e.g. tls-client/tls-ca) are
+# injected by the OpenShell k8s driver at pod build, so the sidecar mounts them without
+# re-declaring them — the runAsUser:0 lets it read the 0400 projected SA token.
 
 echo "==> Recreating the pod (force-delete; the supervisor's SIGTERM teardown is slow)..."
 kubectl delete pod "$SB" -n "$NS" --grace-period=0 --force >/dev/null 2>&1 || true
