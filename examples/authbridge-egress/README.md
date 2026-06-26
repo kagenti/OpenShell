@@ -68,7 +68,10 @@ openshell gateway login
 # CA + Kubernetes objects (reads $LLM_TOKEN from the environment).
 ./02-setup-authbridge.sh
 
-# Provider-bound sandbox, then inject the AuthBridge sidecar.
+# Provider-bound sandbox, then inject the AuthBridge sidecar. --credential reads the value from
+# the env var of the same name; in External mode the gateway credential is never used on the wire
+# (AuthBridge injects the real token from authbridge-cred), so a non-empty placeholder is enough.
+export ANTHROPIC_AUTH_TOKEN='authbridge-supplies-the-real-token'
 openshell provider create --name claude --type anthropic \
   --credential ANTHROPIC_AUTH_TOKEN --config ANTHROPIC_BASE_URL="$LLM_URL"
 openshell inference set --provider claude --model claude-sonnet-4-6 --no-verify

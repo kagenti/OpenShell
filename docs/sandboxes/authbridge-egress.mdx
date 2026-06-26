@@ -174,7 +174,11 @@ Bind the provider so the supervisor injects the credential placeholder automatic
 Use a long-lived entrypoint so you can drive it interactively:
 
 ```bash
-# credential key MUST be ANTHROPIC_AUTH_TOKEN -> the agent sends Bearer auth
+# credential key MUST be ANTHROPIC_AUTH_TOKEN -> the agent sends Bearer auth.
+# --credential reads the value from the local env var of the same name. In External mode the
+# gateway credential is never used on the wire (AuthBridge injects the real token from the
+# authbridge-cred secret), so a non-empty placeholder is all that's needed here.
+export ANTHROPIC_AUTH_TOKEN='authbridge-supplies-the-real-token'
 openshell provider create --name claude --type anthropic \
   --credential ANTHROPIC_AUTH_TOKEN \
   --config ANTHROPIC_BASE_URL="$LLM_URL"
@@ -254,6 +258,7 @@ kubectl exec <sandbox-name> -n team1 -c authbridge-proxy -- \
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | `openshell gateway login` → *"does not use edge authentication"* | Your CLI predates OIDC `gateway login` (it only re-auths edge/Cloudflare gateways); the redeployed gateway *is* OIDC — `deploy-tenant.sh` sets `oidc.issuer`/`oidc.audience` on every run | Re-register — this re-runs the OIDC login your CLI *does* support (interactive, finish within ~120s): `openshell gateway remove openshell-team1` then `scripts/openshell/configure-cli.sh team1` from your kagenti checkout. Or update the CLI to a current build |
+| `provider create`: `--credential ANTHROPIC_AUTH_TOKEN requires local env var … non-empty` | `--credential KEY` reads the value from your local env var `KEY`, which isn't set | `export ANTHROPIC_AUTH_TOKEN=<placeholder>` before `provider create`. In External mode the gateway credential is never used on the wire (AuthBridge injects the real token), so a placeholder is fine |
 | `401 unresolvable credential placeholder` | The provider's placeholder is revision-keyed (`v<rev>_ANTHROPIC_AUTH_TOKEN`) but the mounted secret file is named differently | `03-inject-authbridge.sh` handles this via the volume `items` mapping; if patching by hand, project the Secret under the revision-keyed filename |
 | Interactive `claude` hangs / "queries not going through", `response body too large` in the sidecar log | claude-code's auto-update/telemetry downloads (`downloads.claude.ai`, `github.com`) exceed AuthBridge's 1 MB MITM body cap and 502 | `export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` in the connect shell before running `claude` |
 | `claude` via `exec` says no credentials, but the env is set on the container | `openshell sandbox exec`/`connect` rebuilds the child env from an allowlist (`provider_env` + proxy/TLS + `ANTHROPIC_BASE_URL`/`OPENAI_BASE_URL`/`CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS`). Arbitrary container env is dropped | Attach the provider (placeholder rides in `provider_env`), or set vars inline: `VAR=val claude …` |
