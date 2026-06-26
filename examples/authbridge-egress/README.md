@@ -49,7 +49,6 @@ cd examples/authbridge-egress
 
 export LLM_URL=https://your-litellm.example.com    # your upstream LLM endpoint (Bearer-auth)
 export LLM_TOKEN='sk-...'                           # the real LLM token (read by step 2 from the env)
-export SANDBOX=ab-egress-demo                        # any name for the sandbox you'll create
 ```
 
 Everything else has a working default — override only if needed: `EXT_DIR`/`EXT_REPO`/`EXT_REF`
@@ -59,6 +58,8 @@ beside this OpenShell checkout), and `NS`/`CLUSTER`/`ARCH`. See the table below.
 **2. Run** — copy-paste as-is:
 
 ```bash
+SANDBOX=authbridge-egress    # the sandbox this run creates (rename if you like)
+
 # Build + load both images, redeploy the team1 gateway, then re-login (the restart expires your token).
 ./01-build-images.sh
 openshell gateway login
