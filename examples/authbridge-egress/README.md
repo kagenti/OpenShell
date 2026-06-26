@@ -45,10 +45,10 @@ Full walkthrough and concepts: **[docs/sandboxes/authbridge-egress.mdx](../../do
 ```bash
 cd examples/authbridge-egress
 
-# Set these once: your kagenti checkout + your upstream LLM endpoint.
-export KAGENTI_DIR=~/src/kagenti               # kagenti repo (lets step 1 redeploy the gateway)
+# Set this once: your upstream LLM endpoint.
 export LLM_URL=https://your-litellm.example.com
-# kagenti-extensions is cloned for you; set EXT_DIR=~/src/kagenti-extensions to reuse a local checkout
+# kagenti-extensions is cloned for you (override: EXT_DIR / EXT_REPO / EXT_REF).
+# The kagenti repo is auto-detected beside this OpenShell checkout; set KAGENTI_DIR if it's elsewhere.
 
 # 1. Build + load both images AND redeploy the team1 gateway (gateway tag auto-pinned),
 #    then log back in (the gateway restart expires your CLI token).
@@ -71,8 +71,9 @@ SANDBOX=<sandbox-name>
 ./04-verify.sh "$SANDBOX"
 ```
 
-> If you don't set `KAGENTI_DIR`, step 1 instead prints the `deploy-tenant.sh` command
-> to run yourself (the gateway tag must be pinned).
+> Step 1 auto-detects the kagenti repo beside this OpenShell checkout (`../kagenti`). If it
+> lives elsewhere, set `KAGENTI_DIR`; if it can't be found, step 1 prints the
+> `deploy-tenant.sh` command to run yourself (the gateway tag must be pinned).
 
 ## Common env knobs
 
@@ -81,7 +82,7 @@ SANDBOX=<sandbox-name>
 | `EXT_DIR` | _(optional — local kagenti-extensions checkout; else auto-cloned)_ | 01 |
 | `EXT_REPO` | `https://github.com/huang195/kagenti-extensions` | 01 |
 | `EXT_REF` | `feat/placeholder-resolve-plugin` | 01 |
-| `KAGENTI_DIR` | _(optional — if set, 01 auto-redeploys the gateway)_ | 01 |
+| `KAGENTI_DIR` | _(auto: `../kagenti` beside OpenShell; used to redeploy the gateway)_ | 01 |
 | `NS` | `team1` | 01, 02, 03, 04 |
 | `CLUSTER` | `kagenti` | 01 |
 | `ARCH` | `arm64` | 01 |

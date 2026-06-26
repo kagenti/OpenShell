@@ -103,9 +103,9 @@ endpoint exported once:
 
 ```bash
 cd examples/authbridge-egress
-export KAGENTI_DIR=~/src/kagenti             # kagenti repo (lets Step 1 redeploy the gateway)
 export LLM_URL=https://your-litellm.example.com
-# kagenti-extensions is cloned for you; set EXT_DIR=~/src/kagenti-extensions to reuse a local checkout
+# kagenti-extensions is cloned for you (override: EXT_DIR / EXT_REPO / EXT_REF).
+# The kagenti repo is auto-detected beside this OpenShell checkout; set KAGENTI_DIR if it's elsewhere.
 ```
 
 The tenant namespace is `team1` and the kind cluster is `kagenti`. Override with the
@@ -133,10 +133,11 @@ pinned as shown.
 clones the kagenti-extensions `placeholder-resolve` plugin (unless `EXT_DIR` points at a
 local checkout), compiles the External-capable supervisor binary in a `rust:1.95` builder
 container, wraps it in a `scratch` image, builds the AuthBridge proxy image, loads both into
-kind, and — when `KAGENTI_DIR` is set — redeploys the `team1` gateway for you:
+kind, and redeploys the `team1` gateway for you (auto-detecting the kagenti repo beside the
+OpenShell checkout, or `KAGENTI_DIR` if set):
 
 ```bash
-./01-build-images.sh        # uses $EXT_DIR; with $KAGENTI_DIR set, also redeploys the gateway
+./01-build-images.sh        # builds + loads both images, then redeploys the gateway
 openshell gateway login     # the gateway restart expires your CLI token
 ```
 
@@ -144,8 +145,8 @@ The redeploy points the gateway at the new supervisor image **and pins the gatew
 to `mvp-v2-7784be8`** — required because the chart default (`v0.0.56-rc.3`) predates the
 `inference-scoped-provider-lookup` fix and breaks `openshell inference`/`provider`
 (`feat/authbridge-egress` is based on commit `7784be8`, whose gateway image is that tag).
-If you don't set `KAGENTI_DIR`, the script instead prints the `deploy-tenant.sh` command
-to run yourself.
+If the kagenti repo isn't found beside OpenShell (set `KAGENTI_DIR` if it lives elsewhere),
+the script instead prints the `deploy-tenant.sh` command to run yourself.
 
 ## Step 2: Create the CA and AuthBridge objects
 

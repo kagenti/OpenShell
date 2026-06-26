@@ -13,10 +13,11 @@
 #                     (default: https://github.com/huang195/kagenti-extensions; switch to
 #                      https://github.com/kagenti/kagenti-extensions once PR #626 merges).
 #   EXT_REF           Branch/ref to clone (default: feat/placeholder-resolve-plugin; 'main' post-merge).
-#   KAGENTI_DIR       kagenti repo checkout. If set, this script also runs
-#                     deploy-tenant.sh to redeploy the gateway with the new
-#                     supervisor image and the pinned gateway tag. If unset, it
-#                     prints the deploy command for you to run.
+#   KAGENTI_DIR       kagenti repo checkout (default: a 'kagenti' repo beside the
+#                     OpenShell checkout). When it contains scripts/openshell/
+#                     deploy-tenant.sh, this script redeploys the gateway with the
+#                     new supervisor image + pinned gateway tag; otherwise it prints
+#                     the deploy command for you to run.
 #   OPENSHELL_DIR     OpenShell checkout (default: repo root, derived from this script)
 #   NS                tenant namespace for the gateway redeploy                        (default: team1)
 #   ARCH              target arch: arm64 | amd64                                       (default: arm64)
@@ -29,6 +30,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OPENSHELL_DIR="${OPENSHELL_DIR:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
+KAGENTI_DIR="${KAGENTI_DIR:-${OPENSHELL_DIR%/*}/kagenti}"   # defaults to a 'kagenti' repo beside the OpenShell checkout
 EXT_DIR="${EXT_DIR:-}"
 EXT_REPO="${EXT_REPO:-https://github.com/huang195/kagenti-extensions}"
 EXT_REF="${EXT_REF:-feat/placeholder-resolve-plugin}"
@@ -106,8 +108,8 @@ done
 echo
 echo "==> Images loaded into kind '$CLUSTER':  supervisor=$SUPERVISOR_IMAGE  authbridge=$AUTHBRIDGE_IMAGE"
 
-if [ -n "${KAGENTI_DIR:-}" ]; then
-  echo "==> Redeploying the '$NS' gateway (supervisor=$SUPERVISOR_IMAGE, gateway pinned to $GATEWAY_TAG)..."
+if [ -f "$KAGENTI_DIR/scripts/openshell/deploy-tenant.sh" ]; then
+  echo "==> Redeploying the '$NS' gateway via $KAGENTI_DIR (supervisor=$SUPERVISOR_IMAGE, gateway pinned to $GATEWAY_TAG)..."
   "$KAGENTI_DIR/scripts/openshell/deploy-tenant.sh" "$NS" \
     --set supervisorImage.repository="${SUPERVISOR_IMAGE%:*}" \
     --set supervisorImage.tag="${SUPERVISOR_IMAGE##*:}" \
@@ -116,10 +118,10 @@ if [ -n "${KAGENTI_DIR:-}" ]; then
   echo "==> Done. The gateway restart expired your CLI token — run:  openshell gateway login"
 else
   cat <<EOF
-==> Next, point the '$NS' gateway at these images. Set KAGENTI_DIR=<your kagenti repo>
-    and re-run this script to do it automatically, or run it yourself. The gateway tag
-    MUST be pinned to '$GATEWAY_TAG' — the chart default (v0.0.56-rc.3) predates the
-    inference-scoped-provider-lookup fix and breaks 'openshell inference/provider':
+==> No deploy-tenant.sh under '$KAGENTI_DIR'. Set KAGENTI_DIR=<your kagenti repo> and
+    re-run this script to redeploy automatically, or run the command below yourself. The
+    gateway tag MUST be pinned to '$GATEWAY_TAG' — the chart default (v0.0.56-rc.3) predates
+    the inference-scoped-provider-lookup fix and breaks 'openshell inference/provider':
       \$KAGENTI_DIR/scripts/openshell/deploy-tenant.sh $NS \\
         --set supervisorImage.repository=${SUPERVISOR_IMAGE%:*} \\
         --set supervisorImage.tag=${SUPERVISOR_IMAGE##*:} \\
