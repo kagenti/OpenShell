@@ -7,8 +7,9 @@ SPDX-License-Identifier: Apache-2.0
 Route an OpenShell sandbox's egress through an [AuthBridge](https://github.com/kagenti/kagenti-extensions/tree/main/authbridge)
 sidecar using `NetworkMode::External`. AuthBridge performs TLS interception,
 credential injection (the sandbox holds only an `openshell:resolve:env:<KEY>`
-placeholder), and per-session traffic observability, while OpenShell keeps
-kernel-level isolation and hard egress containment.
+placeholder; AuthBridge fetches the real token from the OpenShell gateway and swaps
+it in), and per-session traffic observability, while OpenShell keeps kernel-level
+isolation and hard egress containment.
 
 Full walkthrough and concepts: **[docs/sandboxes/authbridge-egress.mdx](../../docs/sandboxes/authbridge-egress.mdx)**.
 
@@ -21,10 +22,10 @@ Full walkthrough and concepts: **[docs/sandboxes/authbridge-egress.mdx](../../do
 | Script | What it does |
 |--------|--------------|
 | `01-build-images.sh` | Build the External-capable supervisor image + the AuthBridge proxy image; load both into kind |
-| `02-setup-authbridge.sh` | Generate the TLS-bridge CA; create the `authbridge-ca` Secret, `authbridge-sidecar-config` ConfigMap (from `config.yaml`), and `authbridge-cred` Secret |
-| `03-inject-authbridge.sh` | Patch a sandbox's `podTemplate` (External mode + AuthBridge sidecar + volumes, auto-handling the env index and the revision-keyed placeholder) and recreate the pod |
+| `02-setup-authbridge.sh` | Generate the TLS-bridge CA and create the `authbridge-ca` Secret (the sidecar config ConfigMap is rendered per-sandbox by `03`) |
+| `03-inject-authbridge.sh` | Render the sidecar config (gateway endpoint + sandbox id from the pod), patch the `podTemplate` (External mode + AuthBridge sidecar mounting the sandbox's gateway SA token / mTLS certs), and recreate the pod |
 | `04-verify.sh` | End-to-end checks: External mode, AuthBridge up, `claude` → LLM, placeholder-only env, egress containment, session API |
-| `config.yaml` | The AuthBridge sidecar config (forward proxy + tls_bridge + parsers + placeholder-resolve) |
+| `config.yaml` | The AuthBridge sidecar config **template** (forward proxy + tls_bridge + parsers + placeholder-resolve `gateway` source); `03` renders the per-sandbox values |
 
 ## Prerequisites
 
@@ -48,7 +49,7 @@ Full walkthrough and concepts: **[docs/sandboxes/authbridge-egress.mdx](../../do
 cd examples/authbridge-egress
 
 export LLM_URL=https://your-litellm.example.com    # your upstream LLM endpoint (Bearer-auth)
-export LLM_TOKEN='sk-...'                           # the real LLM token (read by step 2 from the env)
+export ANTHROPIC_AUTH_TOKEN='sk-...'                # your real LLM token (stored in the gateway; the sandbox never sees it)
 ```
 
 Everything else has a working default — override only if needed: `EXT_DIR`/`EXT_REPO`/`EXT_REF`
@@ -65,13 +66,12 @@ SANDBOX=authbridge-egress    # the sandbox this run creates (rename if you like)
 ./01-build-images.sh
 openshell gateway login
 
-# CA + Kubernetes objects (reads $LLM_TOKEN from the environment).
+# TLS-bridge CA (the gateway holds the credential — no mounted secret).
 ./02-setup-authbridge.sh
 
-# Provider-bound sandbox, then inject the AuthBridge sidecar. --credential reads the value from
-# the env var of the same name; in External mode the gateway credential is never used on the wire
-# (AuthBridge injects the real token from authbridge-cred), so a non-empty placeholder is enough.
-export ANTHROPIC_AUTH_TOKEN='authbridge-supplies-the-real-token'
+# Provider-bound sandbox, then inject the AuthBridge sidecar. --credential stores
+# $ANTHROPIC_AUTH_TOKEN (the real token) in the gateway; AuthBridge fetches it as the sandbox
+# and swaps it in. The sandbox itself only ever holds the openshell:resolve:env:<KEY> placeholder.
 openshell provider create --name claude --type anthropic \
   --credential ANTHROPIC_AUTH_TOKEN --config ANTHROPIC_BASE_URL="$LLM_URL"
 openshell inference set --provider claude --model claude-sonnet-4-6 --no-verify
@@ -108,7 +108,6 @@ scripts/openshell/configure-cli.sh team1     # from your kagenti checkout
 | `GATEWAY_TAG` | `mvp-v2-7784be8` | 01 |
 | `SUPERVISOR_IMAGE` | `localhost/openshell/supervisor:dev` | 01 |
 | `AUTHBRIDGE_IMAGE` | `localhost/authbridge-proxy:dev` | 01, 03 |
-| `LLM_TOKEN` | _(optional)_ | 02 |
 
 See the [guide](../../docs/sandboxes/authbridge-egress.mdx) for troubleshooting,
 the architecture diagram, and limitations.

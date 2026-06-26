@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # AuthBridge proxy-sidecar config for the OpenShell NetworkMode::External integration.
-# Mounted into the sidecar at /etc/authbridge/config.yaml by 02-setup-authbridge.sh.
+# This is a TEMPLATE: 03-inject-authbridge.sh renders the __…__ sentinels per sandbox
+# and creates the authbridge-sidecar-config ConfigMap mounted at /etc/authbridge/config.yaml.
 mode: proxy-sidecar
 listener:
   forward_proxy_addr: "0.0.0.0:3128"            # the sandbox reaches this at the veth host IP 10.200.0.1:3128
@@ -23,8 +24,15 @@ pipeline:
       - name: mcp-parser                          # decode MCP tool calls
       - name: placeholder-resolve                 # swap openshell:resolve:env:<KEY> -> real token
         config:
-          source: secret_dir                      # resolve from mounted files (vs source: gateway)
-          secret_dir: /etc/authbridge-cred
+          source: gateway                          # fetch the real credential from the OpenShell gateway
+          gateway:
+            # Rendered per-sandbox by 03-inject-authbridge.sh:
+            endpoint: __GATEWAY_ENDPOINT__         #   from the pod's OPENSHELL_ENDPOINT (scheme picks mTLS vs plaintext)
+            sandbox_id: __SANDBOX_ID__             #   from the pod's OPENSHELL_SANDBOX_ID (the sandbox UUID)
+            insecure: __INSECURE__                 #   true only when the endpoint is plaintext http://
+            # Static — the sandbox's own gateway identity (shared pod-level volumes):
+            mtls_cert_dir: /etc/openshell-tls/client          # used only for https:// endpoints
+            sa_token_path: /var/run/secrets/openshell/token   # projected SA token (audience openshell-gateway)
   inbound:
     plugins:
       - name: a2a-parser
