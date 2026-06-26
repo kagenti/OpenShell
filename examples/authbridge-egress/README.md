@@ -42,38 +42,43 @@ Full walkthrough and concepts: **[docs/sandboxes/authbridge-egress.mdx](../../do
 
 ## Quick start
 
+**1. Set your values** — edit these for your environment:
+
 ```bash
 cd examples/authbridge-egress
 
-# Set this once: your upstream LLM endpoint.
-export LLM_URL=https://your-litellm.example.com
-# kagenti-extensions is cloned for you (override: EXT_DIR / EXT_REPO / EXT_REF).
-# The kagenti repo is auto-detected beside this OpenShell checkout; set KAGENTI_DIR if it's elsewhere.
+export LLM_URL=https://your-litellm.example.com    # your upstream LLM endpoint (Bearer-auth)
+export LLM_TOKEN='sk-...'                           # the real LLM token (read by step 2 from the env)
+export SANDBOX=ab-egress-demo                        # any name for the sandbox you'll create
+```
 
-# 1. Build + load both images AND redeploy the team1 gateway (gateway tag auto-pinned),
-#    then log back in (the gateway restart expires your CLI token).
+Everything else has a working default — override only if needed: `EXT_DIR`/`EXT_REPO`/`EXT_REF`
+(the kagenti-extensions plugin, cloned for you), `KAGENTI_DIR` (the kagenti repo, auto-detected
+beside this OpenShell checkout), and `NS`/`CLUSTER`/`ARCH`. See the table below.
+
+**2. Run** — copy-paste as-is:
+
+```bash
+# Build + load both images, redeploy the team1 gateway, then re-login (the restart expires your token).
 ./01-build-images.sh
 openshell gateway login
 
-# 2. CA + k8s objects (LLM_TOKEN keeps the real token off the command line).
-LLM_TOKEN='<your real LLM token>' ./02-setup-authbridge.sh
+# CA + Kubernetes objects (reads $LLM_TOKEN from the environment).
+./02-setup-authbridge.sh
 
-# 3. Create a provider-bound sandbox, then inject AuthBridge.
+# Provider-bound sandbox, then inject the AuthBridge sidecar.
 openshell provider create --name claude --type anthropic \
   --credential ANTHROPIC_AUTH_TOKEN --config ANTHROPIC_BASE_URL="$LLM_URL"
 openshell inference set --provider claude --model claude-sonnet-4-6 --no-verify
-openshell sandbox create --provider claude -- sleep infinity
-openshell sandbox list                         # note the generated name, then:
-SANDBOX=<sandbox-name>
+openshell sandbox create --name "$SANDBOX" --provider claude -- sleep infinity
 ./03-inject-authbridge.sh "$SANDBOX" "$LLM_URL"
 
-# 4. Verify.
+# Verify end-to-end.
 ./04-verify.sh "$SANDBOX"
 ```
 
-> Step 1 auto-detects the kagenti repo beside this OpenShell checkout (`../kagenti`). If it
-> lives elsewhere, set `KAGENTI_DIR`; if it can't be found, step 1 prints the
-> `deploy-tenant.sh` command to run yourself (the gateway tag must be pinned).
+> If the kagenti repo isn't beside this checkout, set `KAGENTI_DIR`; if it can't be found,
+> `01-build-images.sh` prints the gateway `deploy-tenant.sh` command to run yourself.
 
 ## Common env knobs
 
