@@ -3,20 +3,21 @@
 # SPDX-License-Identifier: Apache-2.0
 title: "AuthBridge Egress Integration"
 sidebar-title: "AuthBridge Egress"
-description: "Route an OpenShell sandbox's egress through an AuthBridge sidecar for credential injection, TLS interception, and traffic observability using NetworkMode::External."
+description: "How an OpenShell sandbox routes its egress through an AuthBridge sidecar for credential injection, TLS interception, and traffic observability using NetworkMode::External — concepts and architecture."
 keywords: "Generative AI, Cybersecurity, OpenShell, AuthBridge, Egress, Credential Injection, Sandbox, Zero Trust, LLM"
 position: 8
 ---
 
-This guide shows how to run an OpenShell sandbox whose **egress is routed through an
-[AuthBridge](https://github.com/kagenti/kagenti-extensions/tree/main/authbridge)
-sidecar** instead of OpenShell's built-in proxy. AuthBridge then performs the TLS
-interception, credential injection, and traffic observability, while OpenShell keeps
-providing kernel-level isolation and hard egress containment.
+This guide explains **how AuthBridge integrates with OpenShell** — the design, the trust
+model, and the architecture of routing a sandbox's egress through an
+[AuthBridge](https://github.com/kagenti/kagenti-extensions/tree/main/authbridge) sidecar
+instead of OpenShell's built-in proxy. AuthBridge performs the TLS interception, credential
+injection, and traffic observability, while OpenShell keeps providing kernel-level isolation
+and hard egress containment.
 
-The steps below are driven by helper scripts in
-[`examples/authbridge-egress/`](https://github.com/kagenti/OpenShell/tree/feat/authbridge-egress/examples/authbridge-egress);
-each step explains what its script does so you can read or run the commands yourself.
+For the runnable walkthrough — prerequisites, building the images, and the step-by-step
+commands — see the example's
+**[README](https://github.com/kagenti/OpenShell/tree/feat/authbridge-egress/examples/authbridge-egress)**.
 
 > **Status:** this is an **experimental, manually-wired integration** (a PoC). It
 > hand-edits one sandbox pod via a `Sandbox` CR patch — there is no operator/webhook
@@ -82,195 +83,28 @@ provider environment, and injects the credential **placeholder** into the agent.
 Only the *resolution* of that placeholder and the TLS interception move from the
 internal proxy to the AuthBridge sidecar.
 
-## Prerequisites
+### How the credential is resolved (gateway source)
 
-- A working OpenShell sandbox install per the
-  **[Kagenti Sandbox Guide](https://github.com/kagenti/kagenti/blob/main/docs/sandbox-guide.md)**
-  (Kind cluster, shared infra, a tenant gateway, the CLI configured and logged in).
-  This guide assumes you can already create a normal sandbox in `team1`.
-- **This OpenShell repo on the `feat/authbridge-egress` branch** (`NetworkMode::External`) —
-  you're already on it if you're reading this, and the supervisor is built from it. The
-  kagenti-extensions **`placeholder-resolve`** plugin is **cloned automatically** by
-  `01-build-images.sh` (from `huang195/kagenti-extensions @ feat/placeholder-resolve-plugin`
-  by default; override with `EXT_REPO`/`EXT_REF`, or set `EXT_DIR` to a local checkout). See
-  *Where the images come from* below; the script fails fast if the resolved source lacks the plugin.
-- `kubectl`, `jq`, `openssl`, and `podman` (or Docker) on your machine.
-- An LLM endpoint that accepts `Authorization: Bearer <token>` (e.g. a LiteLLM
-  proxy) and the corresponding token.
+The real token never lives in the sandbox or in a mounted Secret — it stays in the
+OpenShell gateway as the provider credential. The AuthBridge sidecar fetches it **as the
+sandbox**, reusing the sandbox's own identity material that the OpenShell k8s driver
+already mounts into the pod:
 
-All commands below are run from the example directory, with your checkouts and LLM
-endpoint exported once:
+1. The sidecar reads the pod's projected service-account token (audience
+   `openshell-gateway`) and calls the gateway's `IssueSandboxToken` to mint the sandbox's
+   gateway JWT — the same bootstrap the supervisor performs.
+2. With that JWT it calls `GetSandboxProviderEnvironment`, which returns the resolved
+   credential values. The gateway authorizes this purely on the JWT-derived `sandbox_id`,
+   so a sidecar in the sandbox's pod is allowed to fetch exactly that sandbox's environment.
+3. On each outbound request, `placeholder-resolve` swaps the
+   `openshell:resolve:env:<KEY>` placeholder on the `Authorization` header for the real
+   value, failing closed if it cannot resolve.
 
-```bash
-cd examples/authbridge-egress
-export LLM_URL=https://your-litellm.example.com
-# kagenti-extensions is cloned for you (override: EXT_DIR / EXT_REPO / EXT_REF).
-# The kagenti repo is auto-detected beside this OpenShell checkout; set KAGENTI_DIR if it's elsewhere.
-```
-
-The tenant namespace is `team1` and the kind cluster is `kagenti`. Override with the
-`NS` / `CLUSTER` env vars (see the [README](https://github.com/kagenti/OpenShell/tree/feat/authbridge-egress/examples/authbridge-egress)).
-
-### Where the images come from (unmerged branches)
-
-This integration depends on code that is **committed on feature branches but not yet
-merged to mainline**, so the images are built from local checkouts of those branches.
-`01-build-images.sh` fails fast if a checkout doesn't actually contain the feature.
-
-| Image | Source | Must contain |
-|-------|--------|--------------|
-| supervisor (built here) | OpenShell `feat/authbridge-egress` (`d506f5d`) | `NetworkMode::External` |
-| authbridge-proxy (built here) | kagenti-extensions `feat/placeholder-resolve-plugin` (`c1acaa5`) | `placeholder-resolve` (incl. the `gateway`-source revision-strip fix) + `inference-parser` (Anthropic) + the SSE-relay fix + the session API |
-| gateway (prebuilt, pulled) | image tag `mvp-v2-7784be8` (commit `7784be8`, the base of `feat/authbridge-egress`) | the `inference-scoped-provider-lookup` fix — **not** in the chart default `v0.0.56-rc.3` |
-
-Until these branches are merged (or tagged), the supervisor is built from this OpenShell
-checkout and the plugin is cloned from `EXT_REPO`/`EXT_REF` (Step 1), with the gateway tag
-pinned as shown.
-
-## Step 1: Build and load the images
-
-[`01-build-images.sh`](https://github.com/kagenti/OpenShell/tree/feat/authbridge-egress/examples/authbridge-egress)
-clones the kagenti-extensions `placeholder-resolve` plugin (unless `EXT_DIR` points at a
-local checkout), compiles the External-capable supervisor binary in a `rust:1.95` builder
-container, wraps it in a `scratch` image, builds the AuthBridge proxy image, loads both into
-kind, and redeploys the `team1` gateway for you (auto-detecting the kagenti repo beside the
-OpenShell checkout, or `KAGENTI_DIR` if set):
-
-```bash
-./01-build-images.sh        # builds + loads both images, then redeploys the gateway
-openshell gateway login     # the gateway restart expires your CLI token
-```
-
-The redeploy points the gateway at the new supervisor image **and pins the gateway tag
-to `mvp-v2-7784be8`** — required because the chart default (`v0.0.56-rc.3`) predates the
-`inference-scoped-provider-lookup` fix and breaks `openshell inference`/`provider`
-(`feat/authbridge-egress` is based on commit `7784be8`, whose gateway image is that tag).
-If the kagenti repo isn't found beside OpenShell (set `KAGENTI_DIR` if it lives elsewhere),
-the script instead prints the `deploy-tenant.sh` command to run yourself.
-
-`openshell gateway login` requires a current CLI (with OIDC support). If yours errors with
-*"does not use edge authentication"*, re-register the gateway instead — see *Troubleshooting*.
-
-## Step 2: Create the CA and AuthBridge objects
-
-[`02-setup-authbridge.sh`](https://github.com/kagenti/OpenShell/tree/feat/authbridge-egress/examples/authbridge-egress)
-generates the TLS-bridge CA and creates the `authbridge-ca` Secret in `team1`. There is
-**no credential Secret** — with the `gateway` resolver the real token lives only in the
-OpenShell gateway, and the sidecar fetches it as the sandbox. The sidecar config ConfigMap
-(`authbridge-sidecar-config`) is rendered per-sandbox in Step 4 (it needs the gateway endpoint
-and sandbox id), so `02` only prepares the CA:
-
-```bash
-./02-setup-authbridge.sh
-```
-
-> **Security note:** the session API (`:9094`) is unauthenticated and captures raw
-> request/response bodies — it is force-bound to localhost and only reachable via
-> `kubectl port-forward`. Never expose it via ingress.
-
-## Step 3: Create a provider-bound sandbox
-
-Bind the provider so the supervisor injects the credential placeholder automatically.
-Use a long-lived entrypoint so you can drive it interactively:
-
-```bash
-# credential key MUST be ANTHROPIC_AUTH_TOKEN -> the agent sends Bearer auth.
-# --credential stores the value of the local env var of the same name IN THE GATEWAY. With the
-# gateway resolver this IS the real token: AuthBridge fetches it as the sandbox and swaps it in.
-# The sandbox itself only ever holds the openshell:resolve:env:<KEY> placeholder.
-export ANTHROPIC_AUTH_TOKEN='<your real LLM token>'
-openshell provider create --name claude --type anthropic \
-  --credential ANTHROPIC_AUTH_TOKEN \
-  --config ANTHROPIC_BASE_URL="$LLM_URL"
-openshell inference set --provider claude --model claude-sonnet-4-6 --no-verify
-
-openshell sandbox create --name authbridge-egress --provider claude -- sleep infinity
-```
-
-## Step 4: Inject AuthBridge into the sandbox
-
-[`03-inject-authbridge.sh`](https://github.com/kagenti/OpenShell/tree/feat/authbridge-egress/examples/authbridge-egress)
-reads the gateway endpoint and sandbox id from the running pod, renders the sidecar
-config (the `authbridge-sidecar-config` ConfigMap), then patches the sandbox's `podTemplate`
-to flip the supervisor into External mode, repoint the agent at the real LLM, and add the
-`authbridge-proxy` sidecar; finally it recreates the pod and waits for `2/2` Ready. The
-sidecar mounts the **same gateway-identity volumes the supervisor uses** — the projected SA
-token (and, for an `https://` gateway, the client mTLS certs) — so it authenticates to the
-gateway *as the sandbox*:
-
-```bash
-./03-inject-authbridge.sh <sandbox-name> "$LLM_URL"
-```
-
-<details>
-<summary>What the patch contains (for reference)</summary>
-
-- `replace` the agent's `ANTHROPIC_BASE_URL` value → the real LLM URL
-- `add` env: `OPENSHELL_EXTERNAL_PROXY=10.200.0.1:3128`,
-  `OPENSHELL_EXTERNAL_CA=/etc/authbridge-ext-ca/tls.crt`
-- `add` a volumeMount on the agent so the supervisor can read the External CA
-- `add` the `authbridge-proxy` container (`--config /etc/authbridge/config.yaml`), mounting
-  the rendered config, the forge CA, the sandbox's projected SA token
-  (`/var/run/secrets/openshell`), and — for an `https://` gateway — its client mTLS certs
-  (`/etc/openshell-tls/client`)
-- `add` the `authbridge-sidecar-config` and `authbridge-ca` volumes. The SA-token and
-  client-TLS volumes are **already injected by the OpenShell driver** at pod build, so the
-  sidecar mounts them without re-declaring them
-
-The container is named **`authbridge-proxy`** on purpose — `abctl` only recognizes a
-pod as AuthBridge-enabled when a container is named `authbridge-proxy` /
-`authbridge-envoy` / `authbridge-lite`.
-</details>
-
-## Step 5: Verify
-
-[`04-verify.sh`](https://github.com/kagenti/OpenShell/tree/feat/authbridge-egress/examples/authbridge-egress)
-runs the full end-to-end check:
-
-```bash
-./04-verify.sh <sandbox-name>
-```
-
-It confirms: the supervisor is in **External mode**; the AuthBridge sidecar is
-listening; **`claude` reaches the LLM through AuthBridge** (`AUTHBRIDGE_OK`); the
-sandbox env holds **only the placeholder** (`openshell:resolve:env:…`, never the real
-token); **direct egress is blocked** (a raw-IP `curl` with all proxy vars cleared is
-rejected by the child-netns nftables ruleset); and the session API has parsed traffic.
-
-You can also drive the agent yourself:
-
-```bash
-openshell sandbox connect <sandbox-name>     # then, inside the sandbox:
-export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1    # see troubleshooting
-claude
-```
-
-## Step 6: Observe traffic with `abctl`
-
-`abctl` discovers AuthBridge-enabled pods (by the `authbridge-proxy` container name),
-port-forwards to the `:9094` session API, and shows the parsed traffic — decoded
-prompts, completions, and token counts from `inference-parser`. Query it directly with:
-
-```bash
-kubectl exec <sandbox-name> -n team1 -c authbridge-proxy -- \
-  wget -qO- http://127.0.0.1:9094/v1/sessions
-# {"sessions":[{"id":"default","eventCount":…,"totalTokens":…,"active":true}]}
-```
-
-## Troubleshooting
-
-| Symptom | Cause | Fix |
-|---------|-------|-----|
-| `openshell gateway login` → *"does not use edge authentication"* | Your CLI predates OIDC `gateway login` (it only re-auths edge/Cloudflare gateways); the redeployed gateway *is* OIDC — `deploy-tenant.sh` sets `oidc.issuer`/`oidc.audience` on every run | Re-register — this re-runs the OIDC login your CLI *does* support (interactive, finish within ~120s): `openshell gateway remove openshell-team1` then `scripts/openshell/configure-cli.sh team1` from your kagenti checkout. Or update the CLI to a current build |
-| `provider create`: `--credential ANTHROPIC_AUTH_TOKEN requires local env var … non-empty` | `--credential KEY` reads the value from your local env var `KEY`, which isn't set | `export ANTHROPIC_AUTH_TOKEN='<your real LLM token>'` before `provider create` — it's stored in the gateway and fetched by AuthBridge |
-| `401 unresolvable credential placeholder`; sidecar logs `provider-environment fetch failed` or the resolver never readies | The `gateway` resolver can't fetch the credential: the SA-token volume isn't mounted into the sidecar, the rendered `endpoint`/scheme is wrong, `sandbox_id` doesn't match the sandbox's gateway JWT, or a plaintext endpoint was refused | `kubectl logs <sandbox> -c authbridge-proxy`. Confirm `openshell-sa-token` is mounted; the `endpoint` matches the supervisor's `OPENSHELL_ENDPOINT` (https→mTLS needs the client-tls mount; plaintext needs `insecure: true`); and `sandbox_id` is the UUID (`OPENSHELL_SANDBOX_ID`) |
-| Interactive `claude` hangs / "queries not going through", `response body too large` in the sidecar log | claude-code's auto-update/telemetry downloads (`downloads.claude.ai`, `github.com`) exceed AuthBridge's 1 MB MITM body cap and 502 | `export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` in the connect shell before running `claude` |
-| `claude` via `exec` says no credentials, but the env is set on the container | `openshell sandbox exec`/`connect` rebuilds the child env from an allowlist (`provider_env` + proxy/TLS + `ANTHROPIC_BASE_URL`/`OPENAI_BASE_URL`/`CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS`). Arbitrary container env is dropped | Attach the provider (placeholder rides in `provider_env`), or set vars inline: `VAR=val claude …` |
-| Pod stuck `Terminating`, blocking recreate | The supervisor's SIGTERM teardown is slow | `kubectl delete pod <name> -n team1 --grace-period=0 --force` (the script does this) |
-| `abctl` doesn't list the pod | Sidecar container isn't named `authbridge-proxy` | Name it `authbridge-proxy` (or `-envoy`/`-lite`) |
-| `abctl`: `connect: connection refused` on `/v1/sessions` | Session API not started | Ensure `session.enabled: true` **and** `listener.session_api_addr: ":9094"` in `config.yaml`, then recreate the pod |
-| Egress "bypass" appears to work in tests | You didn't clear `ALL_PROXY`/`grpc_proxy`, so curl used the proxy; or AuthBridge skip-listed the host and blind-tunneled it | Clear *all* proxy vars and test with a raw IP (no DNS) — egress is in fact rejected |
-| TLS errors from the agent | Agent doesn't trust the forge CA | Confirm `OPENSHELL_EXTERNAL_CA` points to the mounted `tls.crt`; the supervisor installs it into `NODE_EXTRA_CA_CERTS`/`SSL_CERT_FILE` |
+For an `https://` gateway this fetch is mutual-TLS, so the sidecar presents the sandbox's
+client certificate; for `http://` it is plaintext (refused for non-loopback unless
+explicitly opted in). The `placeholder-resolve` plugin's alternative `secret_dir` source —
+resolving from a mounted Secret instead of the gateway — remains available as a fallback
+for environments where the sidecar can't reach the gateway as the sandbox.
 
 ## Architecture
 
@@ -314,14 +148,18 @@ gateway, never in the sandbox or a mounted Secret.
 - **Manual wiring.** The sidecar/env/volumes are injected by patching the `Sandbox`
   CR. The productized path is a mutating webhook that injects them automatically —
   not implemented here.
-- **Credential source.** This example uses the `placeholder-resolve` plugin's **`gateway`
-  source**: the sidecar mints the sandbox's own JWT and fetches the credential from the
-  OpenShell gateway (no mounted secret; credential revisions handled dynamically). The
-  plugin's `secret_dir` source — resolving from a mounted Secret — remains available as a
-  fallback for environments where the sidecar can't reach the gateway as the sandbox.
+- **Credential source.** This integration uses the `placeholder-resolve` plugin's
+  **`gateway` source** (the sidecar mints the sandbox's own JWT and fetches the credential
+  from the gateway; no mounted secret, revisions handled dynamically). The `secret_dir`
+  source remains a fallback for environments where the sidecar can't reach the gateway as
+  the sandbox.
 - **1 MB MITM body cap.** AuthBridge buffers MITM'd responses up to 1 MB; large
   non-LLM downloads must be avoided (`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`) or
   the host added to `tls_bridge.passthrough_hosts`.
 - **Fail-open on missing `nft`.** OpenShell's egress lockdown silently no-ops if the
-  `nft` binary is absent from the sandbox base image. Confirm `nft` is present
-  (`/usr/sbin/nft`) so the containment is actually in force.
+  `nft` binary is absent from the sandbox base image — confirm it is present so the
+  containment is actually in force.
+
+See the example
+[README](https://github.com/kagenti/OpenShell/tree/feat/authbridge-egress/examples/authbridge-egress)
+for the prerequisites, the build/run commands, the env knobs, and troubleshooting.
