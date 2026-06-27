@@ -3,21 +3,20 @@
 # SPDX-License-Identifier: Apache-2.0
 title: "AuthBridge Egress Integration"
 sidebar-title: "AuthBridge Egress"
-description: "How an OpenShell sandbox routes its egress through an AuthBridge sidecar for credential injection, TLS interception, and traffic observability using NetworkMode::External — concepts and architecture."
+description: "How an OpenShell sandbox routes its egress through an AuthBridge sidecar — credential injection, TLS interception, and per-session traffic observability via NetworkMode::External."
 keywords: "Generative AI, Cybersecurity, OpenShell, AuthBridge, Egress, Credential Injection, Sandbox, Zero Trust, LLM"
 position: 8
 ---
 
-This guide explains **how AuthBridge integrates with OpenShell** — the design, the trust
-model, and the architecture of routing a sandbox's egress through an
+An OpenShell sandbox can route its egress through an
 [AuthBridge](https://github.com/kagenti/kagenti-extensions/tree/main/authbridge) sidecar
-instead of OpenShell's built-in proxy. AuthBridge performs the TLS interception, credential
-injection, and traffic observability, while OpenShell keeps providing kernel-level isolation
-and hard egress containment.
+instead of the supervisor's built-in proxy. AuthBridge then performs the TLS interception,
+credential injection, and per-session traffic observability, while OpenShell keeps providing
+kernel-level isolation and hard egress containment.
 
-For the runnable walkthrough — prerequisites, building the images, and the step-by-step
-commands — see the example's
-**[README](https://github.com/kagenti/OpenShell/tree/feat/authbridge-egress/examples/authbridge-egress)**.
+This page explains how that integration works and why. For the build-and-run walkthrough —
+prerequisites, the helper scripts, and the commands — see the example
+[README](https://github.com/kagenti/OpenShell/tree/feat/authbridge-egress/examples/authbridge-egress).
 
 > **Status:** this is an **experimental, manually-wired integration** (a PoC). It
 > hand-edits one sandbox pod via a `Sandbox` CR patch — there is no operator/webhook
