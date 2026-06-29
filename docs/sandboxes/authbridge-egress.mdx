@@ -105,6 +105,50 @@ explicitly opted in). The `placeholder-resolve` plugin's alternative `secret_dir
 resolving from a mounted Secret instead of the gateway — remains available as a fallback
 for environments where the sidecar can't reach the gateway as the sandbox.
 
+## Trade-offs vs the built-in proxy
+
+Replacing the supervisor's internal L7 proxy with the AuthBridge sidecar is mostly a move
+to a *richer* egress/identity plane, not a downgrade.
+
+**Preserved — the kernel layer is unchanged.** Everything that makes the sandbox a sandbox
+still holds: the child netns + nftables egress lockdown (only the sidecar is reachable), the
+seccomp/Landlock/filesystem confinement, the credential-placeholder property (the agent never
+sees the real token), CA trust, and the bypass monitor. External mode does **not** weaken
+containment.
+
+**Relocated — and generally an upgrade.** These move from the supervisor to AuthBridge, which
+implements them at least as richly:
+
+| Concern | Built-in proxy | With AuthBridge (External) |
+|---|---|---|
+| Egress policy | OpenShell Rego/OPA, per-request allow/deny | OPA **plus** AuthZEN/Cedar in the AuthBridge pipeline — equal-or-greater capability, authored in AuthBridge rather than OpenShell Rego |
+| Identity & authorization | Sandbox/process identity — the connection is bound to the entrypoint PID via `/proc/net/tcp`; no human-user context | **Per-user context + on-behalf-of** over *both* the user and the agent identity, with token exchange, so downstream services see "user X acting via agent Y." The internal proxy cannot do this. |
+| Agent-traffic observability | proxy denial/activity reporting | richer inference/MCP/A2A parsing + per-session events (`abctl`) |
+
+**Genuinely traded away — narrow, and mostly "where it lives," not "whether it exists":**
+
+- **Per-process attribution.** AuthBridge authorizes on principals (user + agent), not on
+  which PID inside the netns opened the socket — richer on the principal axis, but it drops
+  the intra-sandbox per-process granularity the `/proc/net/tcp` binding gave. Relevant only if
+  you policy or forensic at the process level.
+- **`inference.local` routing indirection.** As wired today, External points the agent's
+  `ANTHROPIC_BASE_URL` straight at the real LLM, so OpenShell's `inference.local`
+  provider/model/per-user-route indirection *at the proxy* is bypassed. (Partially mitigated:
+  the gateway still resolves the provider credential, and AuthBridge can host-route — so this
+  is a configuration choice, not a hard limit.)
+- **Single audit pane in the OpenShell gateway.** The internal proxy reports egress decisions
+  back to the gateway (CLI/UI/OCSF); under External mode that visibility lives in AuthBridge's
+  session API instead. Both sides observe — it just no longer aggregates in the OpenShell
+  gateway, so a single OpenShell-native audit trail would need the two stitched.
+- **Non-LLM L7 protocol coverage.** OpenShell's `L7Provider` parses REST/SQL/GraphQL/WebSocket;
+  AuthBridge's parsers are agent-focused (inference/MCP/A2A). Workload-dependent — only matters
+  if you specifically parse or policy non-LLM protocols.
+
+**Net:** External mode keeps the kernel-level containment and moves the L7 control plane to a
+more capable policy + identity layer (OPA + AuthZEN/Cedar, per-user + agent OBO). The residual
+give-ups are per-PID attribution, the `inference.local` indirection as currently wired,
+gateway-native audit aggregation, and non-LLM L7 parsing.
+
 ## Architecture
 
 ```
